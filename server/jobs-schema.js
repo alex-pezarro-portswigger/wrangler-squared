@@ -17,8 +17,8 @@ export const briefSchema = z.string().trim().min(1).max(500);
 // is accepted. A human task is the rare step no agent can take at all (a click
 // in somebody's console, a vendor, a signature): no repo, no receipt, no agent
 // ever launched for it — it waits on the board until the human marks it done.
-// Neither of the agentless kinds has a repo, and a dependency on either gates
-// the dependent's START (its output is an input), unlike a PR's deploy-after.
+// Neither of the agentless kinds has a repo. Every dependency gates the
+// dependent's START: a PR's once it has deployed, an agentless one's once done.
 //
 // Nothing here describes deployment or verification: the runner infers whether a
 // merge deploys from the repository's own workflows (job-deploys.js) and watches
@@ -42,7 +42,7 @@ export const subJobSchema = z.object({
 });
 export const isSessionSub = (sub) => sub?.kind === 'session';
 export const isHumanSub = (sub) => sub?.kind === 'human';
-// A PR is the only kind with a repository, a pipeline and a deploy-after edge,
+// A PR is the only kind with a repository, a pipeline and a deploy gate,
 // so "not a PR" — not "is a session" — is what every one of those rules turns on.
 export const isPrSub = (sub) => !isSessionSub(sub) && !isHumanSub(sub);
 export const awaitsTicket = (sub) => !!sub?.storyId && !sub?.jiraKey;

@@ -184,7 +184,7 @@ test('the planner is told to write the context once and never to describe a depl
   assert.match(text, /AUTH-1/); assert.match(text, /Split by repo/);
   assert.match(text, /Write `context` ONCE for the whole job/);
   assert.match(text, /Never describe deployments or verification steps/);
-  assert.match(text, /`after` on a PR means DEPLOY AFTER/);
+  assert.match(text, /`after` means START AFTER: a sub-job waits until every PR it is after has deployed/);
   assert.match(text, /Do not propose branch names/);
   assert.match(text, /kind:"pr"\|"session"\|"human"/);
   assert.match(text, /kind:"plan", plan:\{context, stories:\[\{id,key\?,project\?,title\}\]/);

@@ -810,7 +810,7 @@ test('the plan is a dependency graph: a box per sub-job in its wave, an arrow pe
   assert.deepEqual(waves(), [['api'], ['web']]); assert.deepEqual(arrows(), ['api→web']);
   assert.deepEqual([...document.querySelectorAll('.job-node-head .job-kind')].map((k) => k.textContent), ['PR', 'PR']);
   assert.equal(f.q('.job-graph-legend .job-kind'), null, 'a PR-only plan needs no kind legend');
-  assert.match(f.q('[data-node="web"] .job-node-deps summary').textContent, /Deploy after Deliver api/);
+  assert.match(f.q('[data-node="web"] .job-node-deps summary').textContent, /Start after Deliver api deploys/);
   const details = f.q('[data-node="web"] .job-node-deps'); details.open = true; details.dispatchEvent(f.event('toggle'));
   const box = f.q('[data-node="web"] [data-dep]'); box.checked = false; box.dispatchEvent(f.event('change'));
   assert.deepEqual(waves(), [['api', 'web']]); assert.deepEqual(arrows(), [], 'independent work shares wave one with nothing pointing at it');

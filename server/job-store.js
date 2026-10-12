@@ -25,8 +25,6 @@ export const runnable = (run) => run && !run.stopped;
 // one, the human's own mark for the other.
 export const dependencySatisfied = (dep) => isPrSub(dep) ? !!dep?.deployed : dep.stage === 'done' && !dep.cancelledAt;
 export const dependenciesSatisfied = (job, sub) => sub.after.every((id) => dependencySatisfied(job.subJobs.find((s) => s.id === id)));
-// Agentless prerequisites gate the START of a dependent; PR prerequisites only gate merging.
-export const startDependenciesDone = (job, sub) => sub.after.every((id) => { const d = job.subJobs.find((s) => s.id === id); return isPrSub(d) || dependencySatisfied(d); });
 const reviewSessions = (job) => job.reviewSessions ?? true;
 const planRepos = (plan) => [...new Set(plan.subJobs.filter(isPrSub).map((s) => s.repo))];
 // The one place a plan entry becomes a live sub-job, so one approved with the

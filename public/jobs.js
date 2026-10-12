@@ -29,7 +29,7 @@ export const HUMAN_COLUMNS = [
 export const isSessionSub = (sub) => sub?.kind === 'session';
 export const isHumanSub = (sub) => sub?.kind === 'human';
 // Mirrors server/jobs-schema.js isPrSub: a PR is the only kind with a repository,
-// a pipeline and a deploy-after edge, so "not a PR" is what those rules turn on.
+// a pipeline and a deploy gate, so "not a PR" is what those rules turn on.
 export const isPrSub = (sub) => !isSessionSub(sub) && !isHumanSub(sub);
 export const hasSessionSubs = (job) => job.subJobs.some(isSessionSub);
 export const hasHumanSubs = (job) => job.subJobs.some(isHumanSub);
@@ -260,14 +260,12 @@ export function jobCards(jobs) {
       : { job, sub, board: 'prs', stage: sub.stage === 'done' ? 'cleanup' : sub.stage }), ...(job.error || !job.subJobs.length ? [{ job, sub: null, board: 'prs', stage: 'cleanup' }] : [])]
     : [{ job, sub: null, board: 'prs', stage: job.stage }]);
 }
-// "Deploy after" a PR, "after" a session or human task (either must finish before
-// this even starts).
+// Every dependency gates the start: a PR once it deploys, a session or human task
+// once it is done.
 export function dependencyLine(job, sub) {
   const deps = sub.after.map((id) => job.subJobs.find((s) => s.id === id) || { id, title: id });
-  const names = (list) => list.map((d) => d.title).join(' + ');
-  if (!isPrSub(sub)) return deps.length ? `After ${names(deps)}` : '';
-  const starts = deps.filter((d) => !isPrSub(d)), prs = deps.filter(isPrSub);
-  return [starts.length ? `Start after ${names(starts)}` : '', prs.length ? `Deploy after ${names(prs)}` : ''].filter(Boolean).join(' · ');
+  if (!deps.length) return '';
+  return `${isPrSub(sub) ? 'Start after' : 'After'} ${deps.map((d) => isPrSub(d) ? `${d.title} deploys` : d.title).join(' + ')}`;
 }
 // What a job (or one sub-job) cost: planning, every step, CI repairs and the
 // headless comment triage, summed server-side (server/job-spend.js) from every

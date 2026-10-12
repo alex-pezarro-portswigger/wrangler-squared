@@ -299,21 +299,20 @@ test('an implementation session that published anyway lands its PR whatever the 
   assert.equal(g.sub().stage, 'review', 'a stray ready receipt still parks the card for a read rather than being lost');
 });
 
-test('one session works, commits, pushes and opens the PR: no publish phase, and a PR dependency gates the merge, not the launch', async (t) => {
+test('one session works, commits, pushes and opens the PR: no publish phase, and a PR dependency gates the launch until it deploys', async (t) => {
   const f = fixture(t); f.store.update(f.job.id, (j) => { j.reviewMerge = false; });
   await f.approve(plan([spec('api'), spec('web', ['api'])]));
-  assert.deepEqual(f.launched.slice(1).map((w) => [w.sub.id, w.run.phase]), [['api', 'implementation'], ['web', 'implementation']],
-    'both build in parallel: a PR prerequisite means deploy-after');
-  f.report({ kind: 'published', url: 'https://github.com/org/repo/pull/2' }, f.workerFor('web'));
-  assert.ok(f.sub(1).nextPollAt > Date.now() + 9000, 'a fresh PR settles before the first observation');
+  assert.deepEqual(f.launched.slice(1).map((w) => [w.sub.id, w.run.phase]), [['api', 'implementation']],
+    'web is cut from the default branch, so it waits for api to be in it');
+  f.report({ kind: 'published', url: 'https://github.com/org/repo/pull/2' }, f.workerFor('api'));
+  assert.ok(f.sub(0).nextPollAt > Date.now() + 9000, 'a fresh PR settles before the first observation');
   await f.tick();
-  const web = f.sub(1);
-  assert.equal(web.stage, 'pr'); assert.equal(web.state, 'watching');
+  assert.equal(f.sub(0).stage, 'pr'); assert.equal(f.sub(0).state, 'watching');
   assert.equal(f.launched.filter((w) => w.run.phase === 'publish').length, 0);
-  f.setPr({ checkStatus: 'passing' }); await f.tick();
-  assert.deepEqual(f.merged, [], 'api has not deployed yet');
+  f.store.update(f.job.id, (j) => { j.subJobs[0].mergedAt = Date.now(); });
+  await f.tick(); assert.equal(f.launched.filter((w) => w.sub?.id === 'web').length, 0, 'merged is not enough: api has not deployed');
   f.store.update(f.job.id, (j) => { j.subJobs[0].deployed = { checks: ['Live'] }; j.subJobs[0].stage = 'done'; });
-  await f.tick(); assert.deepEqual(f.merged, ['head1']);
+  await f.tick(); assert.deepEqual(f.launched.slice(-1).map((w) => [w.sub.id, w.run.phase]), [['web', 'implementation']]);
 });
 
 test('a session sub-job is a hard prerequisite: nothing behind it starts until its receipt is approved', async (t) => {
@@ -662,6 +661,7 @@ test('New ticket adds a keyless story, which a Jira run keys while the job is ac
   job = f.store.get(f.job.id);
   assert.equal(job.stage, 'active', 'an active job is not sent back through the Jira column');
   assert.equal(job.subJobs[1].jiraKey, 'SEC-42'); assert.equal(job.plan.subJobs[1].jiraKey, 'SEC-42');
+  f.store.update(f.job.id, (j) => { j.subJobs[0].deployed = { checks: ['Live'] }; j.subJobs[0].stage = 'done'; });
   await f.tick();
   assert.deepEqual([f.last().sub.id, f.last().run.phase], ['api-2', 'implementation']);
   assert.match(movesOf(f)[0].detail, /New ticket “Sign-ins are audited” with PR “Emit audit events” to land after this/);
