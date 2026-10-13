@@ -375,9 +375,27 @@ test('planning edits survive live snapshots and submit the displayed revision', 
   f.data.jobs[0].revision = 3; f.view.update(f.data);
   assert.equal(f.q('[data-title="0"]').value, 'Deliver secure API');
   f.q('[data-action="approve-plan"]').click();
-  assert.equal(f.sent[0].revision, 2); assert.equal(f.sent[0].plan.subJobs[0].title, 'Deliver secure API');
+  assert.equal(f.sent[0].revision, 3, 'a bump that left the plan alone is adopted'); assert.equal(f.sent[0].plan.subJobs[0].title, 'Deliver secure API');
   assert.equal(f.q('#job-dialog').open, true, 'remain open until server acknowledges');
   f.view.created(); assert.equal(f.q('#job-dialog').open, false);
+});
+
+test('a plan changed under review keeps the displayed revision, so the server refuses it', (t) => {
+  const f = fixture(t); f.q('[data-job="job1"]').click();
+  f.data.jobs[0].revision = 3; f.data.jobs[0].plan = { ...plan, subJobs: [sub('api')] }; f.view.update(f.data);
+  f.q('[data-action="approve-plan"]').click();
+  assert.equal(f.sent[0].revision, 2);
+});
+
+test('Approve unlocks when the planning run stops under an open review', (t) => {
+  const f = fixture(t); const [job] = f.data.jobs;
+  job.runs = [{ id: 'r1', phase: 'planning', stopped: false, report: true }]; f.view.update(f.data);
+  f.q('[data-job="job1"]').click();
+  assert.equal(f.q('[data-action="approve-plan"]').disabled, true);
+  job.runs[0].stopped = true; job.revision = 3; f.view.update(f.data);
+  assert.equal(f.q('[data-action="approve-plan"]').disabled, false);
+  f.q('[data-action="approve-plan"]').click();
+  assert.equal(f.sent[0].revision, 3);
 });
 
 test('the plan under review shows the shared context, each brief and each check — and no business-value prose', (t) => {

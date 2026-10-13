@@ -84,7 +84,7 @@ export function initJobsView({ send, getAgents, getTasks = () => [], onSession, 
   const root = document.getElementById('jobs');
   const dialog = document.getElementById('job-dialog');
   let data = { jobs: [], settings: { concurrency: 8, maxRepairs: 2, deploymentStaleMinutes: 30 } };
-  let filter = '', needsOnly = false, showDone = false, selected = null, planDraft = null, revision = null;
+  let filter = '', needsOnly = false, showDone = false, selected = null, planDraft = null, revision = null, basePlan = null;
   const commentsShown = new Set();
   // Which folded sections the human has opened: the detail is rebuilt on every
   // graph tick, so the open state has to outlive the markup.
@@ -121,6 +121,15 @@ export function initJobsView({ send, getAgents, getTasks = () => [], onSession, 
     q('#jobs-boards').innerHTML = jobs.map(jobTileHtml).join('') || `<div class="job-empty jobs-empty">${empty}</div>`;
     // Keep a human's plan edits and review snapshot intact across live graph ticks;
     // any open form (feedback, a move) is a human mid-edit and is left alone.
+    // A run stopping or going idle bumps the job's revision without touching the
+    // plan; only a changed plan may make approval refuse, so an unchanged one
+    // adopts the new revision and drops the running lock it was drawn under.
+    const reviewed = planDraft && data.jobs.find((j) => j.id === selected?.jobId);
+    if (reviewed?.plan && JSON.stringify(reviewed.plan) === basePlan) {
+      revision = reviewed.revision;
+      const approve = dialog.querySelector('[data-action="approve-plan"]');
+      if (approve) approve.disabled = reviewed.runs.some((r) => !r.stopped);
+    }
     const humanForm = dialog.querySelector('#job-human-form');
     const currentSub = humanForm && data.jobs.find((j) => j.id === selected?.jobId)?.subJobs.find((s) => s.id === selected?.subId);
     if (dialog.open && selected && !planDraft && (!dialog.querySelector('form') && !dialog.contains(document.activeElement?.closest('input, textarea, select'))
@@ -143,7 +152,7 @@ export function initJobsView({ send, getAgents, getTasks = () => [], onSession, 
   function openDetail(jobId, subId) {
     selected = { jobId, subId }; planDraft = null; revision = null; commentsShown.clear(); openDeps.clear(); openMore.clear();
     const job = data.jobs.find((j) => j.id === jobId);
-    if (!subId && job?.stage === 'planning' && job.plan) { planDraft = structuredClone(job.plan); revision = job.revision; }
+    if (!subId && job?.stage === 'planning' && job.plan) { planDraft = structuredClone(job.plan); revision = job.revision; basePlan = JSON.stringify(job.plan); }
     const sub = job?.subJobs.find((s) => s.id === subId);
     // Something went wrong: the moves are the decision, so they start unfolded.
     if (sub && subState(job, sub) === 'failing') openMore.add('moves');
@@ -365,7 +374,7 @@ export function initJobsView({ send, getAgents, getTasks = () => [], onSession, 
     const job = data.jobs.find((j) => j.id === selected?.jobId);
     if (!job) return;
     const sub = job.subJobs.find((s) => s.id === selected.subId);
-    if (!sub && !planDraft && job.stage === 'planning' && job.plan) { planDraft = structuredClone(job.plan); revision = job.revision; }
+    if (!sub && !planDraft && job.stage === 'planning' && job.plan) { planDraft = structuredClone(job.plan); revision = job.revision; basePlan = JSON.stringify(job.plan); }
     show(sub ? subDetail(job, sub) : jobDetail(job));
     dialog.querySelectorAll('[data-action]').forEach((b) => b.onclick = () => {
       const name = b.dataset.action;
