@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { planSchema } from './jobs-schema.js';
 import { JobStore, migrateJobs, MERGE_IS_DELIVERY } from './job-store.js';
 import { JobRunner, IDLE_RECEIPT_GRACE_MS } from './job-runner.js';
 import { JobRuntime, CleanupRefused } from './job-runtime.js';
@@ -2618,4 +2619,24 @@ test('a PR may land on its own base; an old plan has none, and no other kind may
   assert.equal(planSchema.parse(plan({ repo: '/repo', base: ' release/2.x ' })).subJobs[0].base, 'release/2.x');
   assert.throws(() => planSchema.parse(plan({ repo: '/repo', base: '-D' })), /branch name/);
   assert.throws(() => planSchema.parse(plan({ kind: 'session', base: 'next' })), /only a PR lands on a branch/);
+});
+
+test('init is PR-only in the plan schema, and defaults the branch to main', () => {
+  const init = { owner: 'acme', visibility: 'private' };
+  const ok = planSchema.parse(plan([{ ...spec('api'), repo: '/new/repo', init }]));
+  assert.equal(ok.subJobs[0].init.defaultBranch, 'main');
+  assert.throws(() => planSchema.parse(plan([{ id: 's', title: 'Spike', kind: 'session', brief: 'x', init }])), /only a PR sub-job can create a repository/);
+  assert.throws(() => planSchema.parse(plan([{ ...spec('api'), init: { owner: 'acme', visibility: 'secret' } }])));
+});
+
+test('approval rejects a PR sub-job whose repo folder is absent unless it has init, naming the path', async (t) => {
+  delete process.env.AW_SKIP_REPO_CHECK;
+  t.after(() => { process.env.AW_SKIP_REPO_CHECK = '1'; });
+  const gone = path.join(os.tmpdir(), `aw-missing-${process.pid}`);
+  const f = fixture(t); f.store.action(f.job.id, 'start'); await f.tick();
+  f.report({ kind: 'plan', plan: plan([{ ...spec('api'), repo: gone }]) }); await f.tick();
+  const rev = f.store.get(f.job.id).revision;
+  assert.throws(() => f.store.approvePlan(f.job.id, rev), (e) => e.message.includes(gone) && /does not exist/.test(e.message));
+  f.store.approvePlan(f.job.id, rev, plan([{ ...spec('api'), repo: gone, init: { owner: 'acme', visibility: 'private' } }]));
+  assert.equal(f.store.get(f.job.id).stage, 'active');
 });

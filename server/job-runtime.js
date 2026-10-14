@@ -145,6 +145,7 @@ export class JobRuntime {
     // overwritten by a thinner launch snapshot.
     let worktree;
     let cleanupHead;
+    if (sub?.init && !planning && !existing) await this.bootstrapRepo(repo, sub.init);
     if (existing) {
       worktree = { branch: existing.branch, folderName: existing.path, auto: false };
     } else if (!planning) {
@@ -211,6 +212,33 @@ export class JobRuntime {
     } finally {
       this.pendingLaunch = null;
     }
+  }
+
+  // Creates the brand-new repository a PR sub-job's `init` asks for, before the
+  // ordinary fetch / repo view / worktree flow, which then runs unchanged. Each
+  // step checks what is already there so a retry after a partial failure picks
+  // up where it stopped: the folder, the git repo, the GitHub repo + origin, the
+  // one commit and its push. Only the README is committed; the session scaffolds.
+  async bootstrapRepo(repo, init) {
+    const name = path.basename(repo);
+    const branch = init.defaultBranch || 'main';
+    fs.mkdirSync(repo, { recursive: true });
+    if (!fs.existsSync(path.join(repo, '.git'))) await this.run('git', ['init', '-b', branch], repo);
+    const remotes = (await this.run('git', ['remote'], repo)).split('\n').map((r) => r.trim());
+    if (!remotes.includes('origin')) {
+      const slug = `${init.owner}/${name}`;
+      const exists = await this.run('gh', ['repo', 'view', slug, '--json', 'nameWithOwner'], repo).then(() => true, () => false);
+      if (exists) await this.run('git', ['remote', 'add', 'origin', `https://github.com/${slug}.git`], repo);
+      else await this.run('gh', ['repo', 'create', slug, `--${init.visibility}`, '--source', '.', '--remote', 'origin'], repo);
+    }
+    const hasCommit = await this.run('git', ['rev-parse', '--verify', 'HEAD'], repo).then(() => true, () => false);
+    if (!hasCommit) {
+      fs.writeFileSync(path.join(repo, 'README.md'), `# ${name}\n`);
+      await this.run('git', ['add', 'README.md'], repo);
+      await this.run('git', ['commit', '-m', 'Initial commit'], repo);
+    }
+    const onRemote = await this.run('git', ['ls-remote', '--heads', 'origin', branch], repo);
+    if (!onRemote) await this.run('git', ['push', '-u', 'origin', `HEAD:refs/heads/${branch}`], repo);
   }
 
   // Called by the manifest's onBeforeDispatch hook with the settled card id and

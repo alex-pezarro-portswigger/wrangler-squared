@@ -9,6 +9,8 @@ import path from 'node:path';
 // shape as agent-wrangler's server/test-setup.js, for the same reason.
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wrangler-squared-test-'));
 process.env.AW_DATA_DIR = dataDir;
+// Fixtures use made-up repo paths; the approval-time existence check has its own tests, which unset this.
+process.env.AW_SKIP_REPO_CHECK = '1';
 process.on('exit', () => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });

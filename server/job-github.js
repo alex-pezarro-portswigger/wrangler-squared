@@ -8,7 +8,9 @@ import { inferDeploys } from './job-deploys.js';
 import { ATTRIBUTION } from './jobs-schema.js';
 const exec = promisify(execFile);
 export async function runFile(bin, args, cwd) {
-  const { stdout } = await exec(bin, args, { cwd: cwd?.startsWith('~/') ? path.join(os.homedir(), cwd.slice(2)) : cwd, timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
+  const dir = cwd?.startsWith('~/') ? path.join(os.homedir(), cwd.slice(2)) : cwd;
+  if (dir && !fs.existsSync(dir)) throw new Error(`Folder ${dir} does not exist; cannot run ${bin} ${args[0] || ''} there`.trim());
+  const { stdout } = await exec(bin, args, { cwd: dir, timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
   return stdout.trim();
 }
 const bad = new Set(['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE']);

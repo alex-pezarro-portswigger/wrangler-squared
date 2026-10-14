@@ -117,9 +117,16 @@ export const placeSchema = z.object({ type: z.enum(PLACE_TYPES), ref: z.string()
 // saying what a made output is.
 export const writeActionSchema = z.object({ type: z.enum(WRITE_ACTIONS), to: line.optional(), comment: commentSchema.optional(),
   text: commentSchema.optional(), title: line.optional(), what: line.optional() });
+// A PR sub-job may create its repository first: the runtime makes the folder,
+// runs git init and gh repo create, then carries on as for any other repo.
+export const initSchema = z.object({
+  owner: z.string().trim().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, 'Give a GitHub user or organisation name'),
+  visibility: z.enum(['private', 'public']),
+  defaultBranch: z.string().trim().regex(/^[A-Za-z0-9][\w./-]{0,99}$/, 'Give a branch name').default('main'),
+}).strict();
 export const triggerSchema = z.object({ sub: id, at: z.enum(MILESTONES) });
 export const subJobSchema = z.object({
-  id, title: line, kind: z.enum(['pr', 'session', 'human', 'write']).default('pr'), repo: repoPath.optional(),
+  id, title: line, kind: z.enum(['pr', 'session', 'human', 'write']).default('pr'), repo: repoPath.optional(), init: initSchema.optional(),
   // A PR that lands somewhere other than the job's base (a backport, a release
   // branch). Absent, it lands where the job does (`targetOf`).
   base: branchName.optional(),
@@ -244,6 +251,7 @@ export const planSchema = z.object({
     if (!isPrSub(s) && s.show?.length) issue(`${s.id}: only a PR sub-job has a review step to show things at (show)`);
     if (isPrSub(s) && !s.repo) issue(`${s.id}: a PR sub-job needs repo`);
     if (s.base && !isPrSub(s)) issue(`${s.id}: only a PR lands on a branch (base)`);
+    if (s.init && !isPrSub(s)) issue(`${s.id}: only a PR sub-job can create a repository (init)`);
     if (!isWriteSub(s) && !s.brief) issue(`${s.id}: brief is required`);
     if (!isWriteSub(s) && (s.action || s.by || s.place)) issue(`${s.id}: only a write has a place, an action or a session that makes it (by)`);
     if (s.on && isWriteSub(s)) issue(`${s.id}: a write is made by its session (by); put the milestone (on) on that session`);

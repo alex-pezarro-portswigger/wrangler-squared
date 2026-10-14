@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Window } from 'happy-dom';
 import { initJobsView, isPrimaryActionKey, primaryAction } from './jobs-view.js';
 import { CHECKPOINTS, reviewDefaultsOf, jobCards, jobStatus, jobNeedsReview, dependencyLevels, mergeHeldByComments, changeView, eventFor, writeReviewed, heldByReplan, redScope, changeHint } from './jobs.js';
-import { planGraphHtml, layoutGraphEdges } from './job-graph.js';
+import { planGraphHtml, layoutGraphEdges, newRepoCalloutHtml } from './job-graph.js';
 import { plateHtml, plateAsk } from './job-plates.js';
 import { subState, subLabel, subLine, jobState, jobLabel } from './job-state.js';
 
@@ -2594,4 +2594,16 @@ test('what the agent left running is a chip among the step\'s own, its popover s
   assert.equal(f.sent.at(-1).action, 'stop-running');
   job.subJobs[0].running.items[0].up = false; f.view.update(f.data);
   assert.equal(f.q('#job-dialog .job-run-chip').textContent.trim(), '1 of 2 running');
+});
+
+test('plan review shouts when a step creates a new repository, with path, name, owner and visibility', () => {
+  const plan = { stories: [], subJobs: [{ ...sub('api'), repo: '/Users/me/Projects/fresh-tool', init: { owner: 'acme', visibility: 'public', defaultBranch: 'main' } }, sub('old')] };
+  const { document } = new Window();
+  document.body.innerHTML = newRepoCalloutHtml(plan);
+  const box = document.querySelectorAll('.job-newrepo');
+  assert.equal(box.length, 1, 'only the init step gets one');
+  const text = box[0].textContent;
+  assert.match(text, /Creates a NEW repository/); assert.match(text, /fresh-tool/); assert.match(text, /acme/); assert.match(text, /public/);
+  assert.match(text, /Users\/me\/Projects\/fresh-tool|~\/Projects\/fresh-tool/);
+  assert.equal(newRepoCalloutHtml({ subJobs: [sub('old')] }), '');
 });

@@ -1,7 +1,7 @@
 import { esc, tildify } from './util.js';
 import { ICONS } from './icons.js';
 import { CHECKPOINTS, checkpoint, reviewDefaultsOf, youReview, checkpointLabel, checkpointHint, checkpointButtonHtml, checkpointLock, checkpointWaiting, checkpointToggleHtml, syncCheckpointToggle, codeAwaitingReview, jobCostLabel, JOB_COST_TITLE, SUB_COST_TITLE, storyLabel, isSessionSub, isHumanSub, isPrSub, targetOf, offBase, hasSessionSubs, reviewedSession, kindChipHtml, kindLabel, KIND_TITLE, kindClass, dependencySatisfied, pendingDependencies, jobCards, jobNeedsReview, jobStatus, receiptHtml, cancelledDependencies, commentVerdict, mergeHeldByComments, deploymentStalled, mergeApprovable, COMMENT_TONE_LABEL, deploysLine, eventFor, changeView, changeRoute, proposalOptions, actionMark, actionLine, pinLine, prNumber, runStatus, promptsWaiting, promptWhere, replanPending, replanProposed, heldByReplan, redFixing, redFixReady, redDeclared, isWriteSub, isStoryCreate, isMakeWrite, isJiraWrite, placeOf, PLACES, webUrl, placesOf, writeSession, sessionTrigger, triggerLine, writeTarget, milestoneLabel, workflowFor, triggerDropped, sessionDormant, parkedRun, draftsWaiting, writeAwaitingReview, writeReviewed, writeVerb, placeShort, hasWrites, dependencyLine, storyProject } from './jobs.js';
-import { planGraphHtml, layoutGraphEdges } from './job-graph.js';
+import { planGraphHtml, newRepoCalloutHtml, layoutGraphEdges } from './job-graph.js';
 import { assignScenes, plateHtml, placePopHtml, PLATE_ART } from './job-plates.js';
 import { holdSkies, mountSkies, mountMastSky } from './job-skylines.js';
 import { STATES, stateIconHtml, subState, subLabel, subLine, jobState, jobLabel, leadSub, sortJobs } from './job-state.js';
@@ -791,7 +791,7 @@ export function initJobsView({ send, stageImage, frameOf = sourceToFrame, getAge
     const redSub = red && liveSub(red.sub);
     const asked = red ? `<p class="job-replan-ask"><b>${proposal.escalation ? 'Declared red' : 'Red step'}</b> ${esc(redSub?.title || red.sub)}${redSub?.error ? ` · ${esc(redSub.error)}` : ''}${proposal.escalation?.ask ? `<br><b>Needs you</b> ${esc(proposal.escalation.ask)}` : ''}</p>` : `<p class="job-replan-ask"><b>You asked</b> ${esc(job.replan.feedback)}</p>`;
     return `${asked}${diagnosis}${choose}${planGraphHtml(merged, { stateOf: (s) => liveSub(s.id) ? subState(job, liveSub(s.id)) : 'planned', markOf, openTickets, reviewWrites: job.reviewWrites, base: job.base })}
-      <ul class="job-replan-changes">${items.join('') || '<li>No sub-job changes</li>'}</ul>${planMoreHtml(job, merged)}`;
+      <ul class="job-replan-changes">${items.join('') || '<li>No sub-job changes</li>'}</ul>${newRepoCalloutHtml({ subJobs: merged.subJobs.filter((s) => changes.added.includes(s.id)) })}${planMoreHtml(job, merged)}`;
   }
   // The job dialog's one extended button: the single most urgent thing the job is
   // waiting on. A green PR awaiting approval merges from here, pinned to the head
@@ -929,7 +929,7 @@ export function initJobsView({ send, stageImage, frameOf = sourceToFrame, getAge
       const reviewed = reviewedOf(writes);
       const bad = planDraft.subJobs.filter(writeProblem);
       if (writeEdit != null && !isWriteSub(planDraft.subJobs[writeEdit])) writeEdit = null;
-      body = `${writes.length ? `<div class="job-chips job-write-count">${chip(ICONS.link, `${writes.length} write${writes.length === 1 ? '' : 's'}${reviewed ? ` · ${reviewed} reviewed` : ''}`, { cls: 'job-chip-quiet', title: 'Open a place under its step to change its writes; its eye says whether it stops for your review' })}</div>` : ''}${planGraphHtml(planDraft, { editable: true, openDeps, openTickets, openShow, editing: writeEdit, reviewWrites: reviewDefault(), base: job.base })}${writeEdit != null ? writeEditorHtml(job, planDraft, writeEdit) : ''}${planMoreHtml(job, planDraft)}`;
+      body = `${writes.length ? `<div class="job-chips job-write-count">${chip(ICONS.link, `${writes.length} write${writes.length === 1 ? '' : 's'}${reviewed ? ` · ${reviewed} reviewed` : ''}`, { cls: 'job-chip-quiet', title: 'Open a place under its step to change its writes; its eye says whether it stops for your review' })}</div>` : ''}${newRepoCalloutHtml(planDraft)}${planGraphHtml(planDraft, { editable: true, openDeps, openTickets, openShow, editing: writeEdit, reviewWrites: reviewDefault(), base: job.base })}${writeEdit != null ? writeEditorHtml(job, planDraft, writeEdit) : ''}${planMoreHtml(job, planDraft)}`;
       const authority = authorityText(job, planDraft);
       fab = `<button class="primary" data-action="approve-plan" title="${esc(bad.length ? `Finish ${bad.length === 1 ? 'the write' : `${bad.length} writes`} first: ${writeProblem(bad[0])}` : authority)}" ${running || bad.length ? 'disabled' : ''}>${ICONS.check}Approve ${planDraft.subJobs.filter((s) => !isWriteSub(s)).length}</button>`;
     } else if (replanProposed(job)) body = proposalHtml(job);

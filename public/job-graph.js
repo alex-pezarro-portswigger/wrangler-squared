@@ -173,6 +173,16 @@ export function graphGrid(cols, work, levels, styleOf) {
   return { at, lanes, laneOnly, gutters: gutters.map((g) => g.size), rows: tileRows };
 }
 
+// Loud, one per repository a plan would CREATE: nothing about an init step may
+// be easy to approve by accident, since it makes a repo on GitHub.
+export function newRepoCalloutHtml(plan) {
+  return (plan?.subJobs || []).filter((s) => isPrSub(s) && s.init && s.repo).map((s) => `<div class="job-newrepo" role="note">
+    <strong>${ICONS.folder}Creates a NEW repository</strong>
+    <dl><dt>Local path</dt><dd><code>${esc(tildify(s.repo))}</code></dd><dt>Name</dt><dd><code>${esc(s.repo.split('/').filter(Boolean).pop())}</code></dd>
+    <dt>Owner</dt><dd><code>${esc(s.init.owner)}</code></dd><dt>Visibility</dt><dd><b class="job-newrepo-${esc(s.init.visibility)}">${esc(s.init.visibility)}</b></dd>
+    <dt>Default branch</dt><dd><code>${esc(s.init.defaultBranch || 'main')}</code></dd></dl><small>${esc(s.title)} · approving creates it on GitHub with a README-only first commit</small></div>`).join('');
+}
+
 // A proposed change to a running job's plan (`markOf`) is drawn static, each
 // node in its live state and labelled with what approval would do to it.
 export const rocketHtml = (id) => `<g class="job-edge-glyph" data-glyph="${esc(id)}"><circle r="12"/><g transform="translate(-9.6 -9.6) scale(.8)">${ROCKET_PATH}</g></g>`;

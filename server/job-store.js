@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { DATA_DIR } from './data-dir.js';
@@ -59,8 +61,19 @@ function activate(j) {
   j.subJobs = j.plan.subJobs.map((s) => buildSubJob(j.plan, s));
   j.stage = 'active';
 }
+// A PR sub-job on a repo that is not there and not being created would launch
+// into `spawn git ENOENT`; refuse it at the approval, naming the path.
+function requireRepos(plan) {
+  if (process.env.AW_SKIP_REPO_CHECK) return;
+  for (const s of plan.subJobs.filter(isPrSub)) {
+    if (s.init) continue;
+    const dir = s.repo.startsWith('~/') ? path.join(os.homedir(), s.repo.slice(2)) : s.repo;
+    if (!fs.existsSync(dir)) throw new Error(`${s.id}: repository folder ${s.repo} does not exist. Clone it there, correct the path, or have the plan create it (init: owner, visibility)`);
+  }
+}
 function approve(j, input) {
   const plan = withStoryCreates(planSchema.parse(input));
+  requireRepos(plan);
   j.plan = plan;
   j.repos = planRepos(plan);
   j.approvedAt = Date.now(); j.error = null;

@@ -663,3 +663,32 @@ test('a PR\'s own base wins over the job\'s when its worktree is cut', async () 
   const missing = async (bin, args) => { if (args[0] === 'rev-parse') throw new Error('fatal'); return ''; };
   await assert.rejects(runtimeWith(fakeHost().host, { run: missing }).launch({ id: 'job_12345678', title: 'x', agent: 'claude' }, { id: 'api', repo: '/repo', base: 'release/2.x' }, { id: 'run_1', phase: 'implementation' }, () => {}), /"release\/2\.x" does not exist on origin; push it or change this PR's/);
 });
+
+test('launch bootstraps a new repo before the ordinary flow: folder, git init, gh create, README commit, push, then fetch', async () => {
+  const { host } = fakeHost();
+  const repo = path.join(DATA_DIR, `fresh-${++paths}`);
+  const { calls, run } = fakeRun({ overrides: {
+    remote: () => '', 'rev-parse': (a) => { if (a.includes('HEAD')) throw new Error('no commits'); return 'cafe'; },
+    'ls-remote': () => '', repo: (a) => { if (a[1] === 'create') return ''; if (a.includes('nameWithOwner')) throw new Error('not found'); return JSON.stringify({ defaultBranchRef: { name: 'main' } }); },
+  } });
+  await runtimeWith(host, { run }).launch({ id: 'job_12345678', title: 'T', agent: 'claude' },
+    { id: 'api', repo, init: { owner: 'acme', visibility: 'private', defaultBranch: 'main' } }, { id: 'run_1', phase: 'implementation' }, () => {});
+  const verbs = calls.map((a) => a.slice(0, 2).join(' '));
+  assert.ok(fs.existsSync(repo));
+  assert.equal(fs.readFileSync(path.join(repo, 'README.md'), 'utf8'), `# ${path.basename(repo)}\n`);
+  assert.deepEqual(calls.find((a) => a[0] === 'init'), ['init', '-b', 'main']);
+  assert.deepEqual(calls.find((a) => a[0] === 'repo' && a[1] === 'create'), ['repo', 'create', `acme/${path.basename(repo)}`, '--private', '--source', '.', '--remote', 'origin']);
+  assert.ok(verbs.indexOf('commit -m') < verbs.indexOf('push -u') && verbs.indexOf('push -u') < verbs.indexOf('fetch origin'), verbs.join(' | '));
+});
+
+test('a retry of a bootstrapped repo skips what exists: no init, create, commit or push', async () => {
+  const { host } = fakeHost();
+  const repo = path.join(DATA_DIR, `fresh-${++paths}`);
+  fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+  const { calls, run } = fakeRun({ overrides: { remote: () => 'origin', 'ls-remote': () => 'abc\trefs/heads/main', repo: () => JSON.stringify({ defaultBranchRef: { name: 'main' } }), 'rev-parse': () => 'cafe' } });
+  await runtimeWith(host, { run }).launch({ id: 'job_12345678', title: 'T', agent: 'claude' },
+    { id: 'api', repo, init: { owner: 'acme', visibility: 'private' } }, { id: 'run_1', phase: 'implementation' }, () => {});
+  const verbs = calls.map((a) => a[0]);
+  for (const v of ['init', 'commit', 'push', 'add']) assert.ok(!verbs.includes(v), `${v} ran on a retry`);
+  assert.ok(!calls.some((a) => a[0] === 'repo' && a[1] === 'create'));
+});
