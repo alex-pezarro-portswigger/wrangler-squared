@@ -8,7 +8,17 @@ import { inferDeploys } from './job-deploys.js';
 import { ATTRIBUTION } from './jobs-schema.js';
 const exec = promisify(execFile);
 export async function runFile(bin, args, cwd) {
-  const { stdout } = await exec(bin, args, { cwd: cwd?.startsWith('~/') ? path.join(os.homedir(), cwd.slice(2)) : cwd, timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
+  const dir = cwd?.startsWith('~/') ? path.join(os.homedir(), cwd.slice(2)) : cwd;
+  // A cwd that no longer exists makes execFile throw `spawn <bin> ENOENT` — the
+  // SAME error Node raises when the binary itself is missing from PATH, and
+  // indistinguishable from it (identical code/errno/syscall/path). A sub-job
+  // whose repo or worktree folder was moved or deleted would otherwise wedge the
+  // job with "spawn git ENOENT", sending the human hunting for a git install that
+  // is not the problem. Check the directory first and name the one that is gone.
+  if (dir && !fs.existsSync(dir)) {
+    throw new Error(`Working directory no longer exists: ${dir} — the repository or worktree may have been moved or deleted; restore it, then retry`);
+  }
+  const { stdout } = await exec(bin, args, { cwd: dir, timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
   return stdout.trim();
 }
 const bad = new Set(['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE']);
