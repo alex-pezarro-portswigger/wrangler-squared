@@ -2,6 +2,7 @@ import { isPrSub, isSessionSub, isWriteSub } from './jobs-schema.js';
 import { reworkSub } from './job-sub-ops.js';
 import { requestReplan, mergeReplan } from './job-replan.js';
 import { chipAction, stampActions } from './job-actions.js';
+import { parkedReadyRun, askAgent } from './job-parked.js';
 import { isDeclared } from './job-red.js';
 
 // request-change: the one way a human's idea enters a job, from the plan, a code
@@ -40,7 +41,7 @@ export function changeView(job, sub) {
   return step;
 }
 
-export function requestChange(job, sub, { at, ref, text }, { now }) {
+export function requestChange(job, sub, { at, ref, text, attachments }, { now }) {
   const idea = String(text || '').trim().slice(0, CHANGE_TEXT_MAX);
   if (!idea) throw new Error('Explain the change you want');
   const view = changeView(job, sub);
@@ -54,8 +55,15 @@ export function requestChange(job, sub, { at, ref, text }, { now }) {
     return { detail: `Sent the declared red on ${quoted(sub.title)} back to the planner`, route: 'planner' };
   }
   if (STEP_AGENT.has(view.at)) {
-    if (liveRun(job, sub.id)) throw new Error('Wait for the session to stop');
     if (job.replan) throw new Error('A plan change is pending. Approve or discard it first.');
+    // The session that wrote this tree is still open (job-parked.js): the idea is
+    // written to it, and it answers or reworks and reports ready again.
+    const parked = view.at === 'code' && sub.state === 'verified' && parkedReadyRun(job, sub);
+    if (parked) {
+      const id = askAgent(sub, { from: 'human', text: idea, images: attachments }, now);
+      return { detail: `${sub.answering.kind === 'ask' ? 'Asked' : 'Asked for a change to'} ${quoted(sub.title)}`, route: 'parked', messageId: id };
+    }
+    if (liveRun(job, sub.id)) throw new Error('Wait for the session to stop');
     if (view.at === 'session') {
       sub.feedback = idea; sub.result = null; sub.error = null; sub.blocked = null; sub.stage = 'session'; sub.state = 'queued';
       return { detail: `Requested changes on ${quoted(sub.title)}`, route: 'step' };
