@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { isHumanSub, jobInputSchema, reportSchema } from './jobs-schema.js';
 import { runForSession } from './jobs.js';
 import { makeCreateJob } from './job-create.js';
+import { workingTreeHash } from './git.js';
 
 // MCP tools in the EXTENSION signature: `handler({ host, caller }, args)` — no
 // `deps` (agent-wrangler docs/superpowers/specs/2026-09-11-extensions-api-design.md,
@@ -27,18 +28,30 @@ function syncBranch(host, caller) {
   if (sub?.worktree && sub.worktree.branch !== branch) host.stores.jobs.noteBranchRename(caller, branch);
 }
 
+async function treeOf(host, caller, runId) {
+  const hit = runForSession(host.stores.jobs, caller);
+  const sub = hit?.run.id === runId && hit.job.subJobs.find((s) => s.id === hit.run.subJobId);
+  if (!sub?.worktree?.path) return null;
+  try { return await workingTreeHash(sub.worktree.path); } catch (e) { host.log('tree hash failed', e); return null; }
+}
+
 export const jobReportTool = {
   name: 'job_report',
-  description: 'Submit the receipt for your assigned automated job run, then stop. One receipt per run: plan, ready (the working tree awaits the human\'s code review, nothing committed), published (the PR url), repaired, deployed or completed (with writes: one result per write your prompt lists — written, already, or failed with the place\'s own error — with its link, or a made output\'s location). A session whose prompt puts writes under review first sends drafts (each reviewed write as it would make it) and waits for mail with the human\'s decision before it completes. Checks are normally 1–3 bullets of a few words, e.g. "Build passed"; keep the detail in the transcript. Only the assigned session can report; identical retries are safe, and a terminal recap does not advance the job. If you cannot finish, submit {kind:"blocked", summary:"one sentence"} and optionally name the move a human should make: move:"fix-here" (a new commit on this PR), "split-out" (a second PR on this ticket), "new-ticket" (scope nobody knew about), "reorder" (this must land after something else), "drop", "mark" (it is already done elsewhere) or "accept-red" (the failing check or post-merge run is noise; merge or count it as landed anyway). You never change the plan yourself; the human clicks the move.',
+  description: 'Submit the receipt for your assigned automated job run, then stop. One receipt per run: plan (a plan change may also carry diagnosis, actions pinned to a head, merge commit or stage, and up to three ranked options), ready (the working tree awaits the human\'s code review, nothing committed; with Code on You review your session then stays open, paused, for the human to write to you; each Show me item of your prompt is answered by a check of that exact text carrying shots, run or couldNot, and a receipt that leaves one out is refused), reply (text, shots?, run?: answers a human who wrote to your paused session; changes nothing, the session stays paused), published (the PR url), repaired, deployed or completed (with writes: one result per write your prompt lists — written, already, or failed with the place\'s own error — with its link, or a made output\'s location). A session whose prompt puts writes under review first sends drafts (each reviewed write as it would make it) and waits for mail with the human\'s decision before it completes. Checks are normally 1–3 bullets of a few words, e.g. "Build passed"; keep the detail in the transcript. Only the assigned session can report; identical retries are safe, and a terminal recap does not advance the job. If you cannot finish, go up one level: {kind:"blocked", summary:"one sentence"}, or {kind:"replan", summary, why?} when the work needs more than your step, both of which go to the planner first; {kind:"escalate", summary, tried?, ask} declares your step red for the human with what you found, what you tried and the decision you need (the planner may also attach up to three options). You never change the plan yourself.',
   inputSchema: { runId: z.string(), report: reportSchema },
   async handler({ host, caller }, { runId, report }) {
     try {
       syncBranch(host, caller);
-      const job = host.stores.jobs.report(caller, runId, report);
+      // Approval is pinned to the tree this receipt describes, read now while the
+      // session is waiting for it. A tree git cannot read pins nothing.
+      const meta = report.kind === 'ready' ? { treeHash: await treeOf(host, caller, runId) } : {};
+      const job = host.stores.jobs.report(caller, runId, report, meta);
       await host.rebuild();
       // Drafts leave the run open: the session ends its turn, but its work is
       // not done until the mail with the human's decision has been acted on.
+      const parked = job.runs.find((r) => r.id === runId);
       const next = report.kind === 'drafts' ? 'End your turn and wait: mail will say which writes to make, with their final text. Make exactly those, then send kind:"completed".'
+        : parked?.parkedFor === 'ready' && parked.parkedAt && !parked.mailedAt ? 'End your turn and wait: the human may write to you by mail (a question gets kind:"reply"; a change is made and reported ready again). Do not stop the session yourself.'
         : 'Stop now. Wrangler coordinates the next step.';
       return result({ accepted: true, jobId: job.id, next });
     } catch (e) { return errorResult(e.message); }

@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Window } from 'happy-dom';
 import { initJobsView, isPrimaryActionKey, primaryAction } from './jobs-view.js';
-import { CHECKPOINTS, reviewDefaultsOf, jobCards, jobStatus, jobNeedsReview, dependencyLevels, mergeHeldByComments, movesFor, eventFor, writeReviewed } from './jobs.js';
+import { CHECKPOINTS, reviewDefaultsOf, jobCards, jobStatus, jobNeedsReview, dependencyLevels, mergeHeldByComments, changeView, eventFor, writeReviewed, heldByReplan, redScope, changeHint } from './jobs.js';
 import { planGraphHtml, layoutGraphEdges } from './job-graph.js';
-import { plateHtml } from './job-plates.js';
+import { plateHtml, plateAsk } from './job-plates.js';
+import { subState, subLabel, subLine, jobState, jobLabel } from './job-state.js';
 
 const sub = (id, after = []) => ({ id, title: `Deliver ${id}`, repo: '/repo', storyId: 'story', jiraKey: 'AUTH-1', after, brief: 'Implement it and open the PR', sessions: [], repairs: [] });
 const plan = { context: 'Keys live in the vault; every service reads them at boot.', stories: [{ id: 'story', key: 'AUTH-1', title: 'Customers can sign in' }], subJobs: [sub('api'), sub('web', ['api'])] };
@@ -17,7 +18,7 @@ function fixture(t) {
   document.body.innerHTML = '<section id="jobs"></section><dialog id="job-dialog"></dialog>';
   const staging = { stage: async () => ({ name: 'paste-1700000000000-aaaa1111.png' }) };
   const sent = [], usualSaves = [], sessions = [], diffs = [], diffContexts = [], onBoard = new Set();
-  const view = initJobsView({ send: (m) => (m.patch?.usualPick ? usualSaves : sent).push(structuredClone(m)), stageImage: (blob) => staging.stage(blob), getAgents: () => [{ id: 'claude', label: 'Claude', models: [{ value: 'sonnet', label: 'Sonnet', default: true }], efforts: [{ value: 'high', label: 'High' }, { value: 'max', label: 'Max' }] }, { id: 'codex', label: 'Codex', models: [{ value: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', default: true }], efforts: [{ value: 'high', label: 'High' }] }], onSession: (s) => sessions.push(s), onDiff: (s, ctx) => { diffs.push(s); diffContexts.push(ctx); }, onBoard: (s) => onBoard.has(s) });
+  const view = initJobsView({ send: (m) => (m.patch?.usualPick ? usualSaves : sent).push(structuredClone(m)), stageImage: (blob) => staging.stage(blob), frameOf: async () => ({ mime: 'image/png', dataBase64: 'cG5n' }), getAgents: () => [{ id: 'claude', label: 'Claude', models: [{ value: 'sonnet', label: 'Sonnet', default: true }], efforts: [{ value: 'high', label: 'High' }, { value: 'max', label: 'Max' }] }, { id: 'codex', label: 'Codex', models: [{ value: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', default: true }], efforts: [{ value: 'high', label: 'High' }] }], onSession: (s) => sessions.push(s), onDiff: (s, ctx) => { diffs.push(s); diffContexts.push(ctx); }, onBoard: (s) => onBoard.has(s) });
   t.after(async () => { globalThis.document = prevDoc; globalThis.FormData = prevFormData; await window.happyDOM.close(); });
   const job = { id: 'job1', title: 'Sign-in', intent: 'Reliable sign-in', repos: ['/repo'], stage: 'planning', plan, subJobs: [], runs: [], moves: [], revision: 2, reviewMerge: true };
   const data = { jobs: [structuredClone(job)], settings: { concurrency: 2, maxRepairs: 2 } };
@@ -62,7 +63,7 @@ test('the board colours each segment by its sub-job, and a segment opens that su
   assert.equal(f.q('#job-dialog h2').textContent, 'Sign-in', 'the sub-job leads back to its job');
 });
 
-test('code review is a stop before anything is committed: the card asks for a read, approval is pinned to the receipt, and Request changes sends it back', (t) => {
+test('code review is a stop before anything is committed: the card asks for a read, approval is pinned to the receipt, and Add idea sends it back', (t) => {
   const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
   job.subJobs = [{ ...sub('api'), stage: 'review', state: 'verified', worktree: { path: '/wt', branch: 'fix/AUTH-1' }, sessions: ['s1'], ready: { checks: ['Tests pass', 'Lint clean'], receiptId: 'run_1' } }];
   f.view.update(f.data);
@@ -77,7 +78,10 @@ test('code review is a stop before anything is committed: the card asks for a re
   f.q('#job-ide').click(); assert.deepEqual(f.sent.at(-1), { type: 'job-open-ide', id: 'job1', subJobId: 'api' }); assert.equal(f.q('#job-dialog').open, true, 'the dialog stays: approval happens here');
   f.data.settings.ideApp = 'Rider'; f.view.update(f.data); assert.equal(f.q('#job-ide').textContent, 'Review code in Rider');
   delete f.data.settings.ideApp; f.view.update(f.data);
-  assert.deepEqual(movesFor(job, job.subJobs[0]).map((m) => [m.id, m.label]).filter(([id]) => id === 'fix-here'), [['fix-here', 'Request changes']]);
+  const box = f.q('.job-change');
+  assert.deepEqual([box.dataset.changeAt, box.dataset.changeRef], ['code', 'run_1'], 'the idea box is on the review itself, pinned to the receipt that was read');
+  assert.equal(box.querySelector('textarea').placeholder, 'Ask about it, or say what to change…');
+  assert.match(box.textContent, /This session.*A question gets an answer\. A change gets a new round\./s, 'it names who hears it and what they do with it'); assert.equal(f.q('.job-moves'), null, 'no Moves menu');
   f.q('[data-action="approve-code"]').click();
   assert.equal(f.sent.at(-1).action, 'approve-code'); assert.equal(f.sent.at(-1).readyReceiptId, 'run_1');
   job.subJobs[0].state = 'approved'; f.view.update(f.data);
@@ -129,7 +133,7 @@ test('a sub-job carries what the merge will do and the note left for the next se
   job.subJobs[0].error = 'PR was closed without merging'; f.view.update(f.data);
   assert.equal(f.q('.job-plate-graph .node[data-sub="api"]').classList.contains('tone-bad'), true);
   assert.equal(f.q('[data-board="job1"] .job-status').textContent, 'PR was closed');
-  assert.deepEqual(eventFor(job, job.subJobs[0]), { title: 'PR was closed', detail: 'PR was closed without merging', suggested: null });
+  assert.deepEqual(eventFor(job, job.subJobs[0]), { title: 'PR was closed', detail: 'PR was closed without merging' });
 });
 
 test('a step waiting on a prompt is the human’s: it says so, and it counts under Needs me', (t) => {
@@ -174,151 +178,73 @@ test('the job’s button answers a waiting prompt before a merge, and says how m
   fab.click(); assert.deepEqual(f.sessions, ['docs-card']);
 });
 
-test('the event box names what happened and the move the agent suggested, and that move is the hot one', (t) => {
+test('the event box names what happened, escaped, and Add idea is the way to answer it', (t) => {
   const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
   job.subJobs = [{ ...sub('api'), stage: 'implementation', error: 'The <proto> files are out of sync with the API',
-    blocked: { summary: 'The <proto> files are out of sync with the API', move: 'split-out', phase: 'implementation', at: 1 } }];
+    blocked: { summary: 'The <proto> files are out of sync with the API', phase: 'implementation', at: 1 } }];
   f.view.update(f.data); f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
   const dialog = f.q('#job-dialog');
   assert.equal(dialog.querySelector('.job-event b').textContent, 'Worker blocked');
   assert.equal(dialog.querySelector('.job-event p').textContent, 'The <proto> files are out of sync with the API');
   assert.ok(!dialog.innerHTML.includes('<proto>'), 'the agent’s sentence is escaped');
-  assert.equal(dialog.querySelector('.job-event-move').textContent, 'Suggests Split out');
-  assert.deepEqual([...dialog.querySelectorAll('.job-move')].map((b) => b.dataset.move), ['fix-here', 'split-out', 'new-ticket', 'reorder', 'drop', 'mark']);
-  assert.deepEqual([...dialog.querySelectorAll('.job-move.hot')].map((b) => b.dataset.move), ['split-out'], 'suggested, not chosen');
-  // Fix here on a sub-job with no PR promises a rerun, not a commit that cannot exist.
-  assert.equal(dialog.querySelector('[data-move="fix-here"] b').textContent, 'Retry with a note');
+  assert.equal(dialog.querySelector('.job-event-move'), null); assert.equal(dialog.querySelector('.job-moves'), null);
+  assert.equal(dialog.querySelector('details[data-keep="change"]'), null, 'no fold to open: the box is always there');
+  assert.ok(dialog.querySelector('.job-change').classList.contains('is-open'), 'a failing step starts with the box open, its hint showing');
+  assert.equal(dialog.querySelector('.job-change').dataset.changeAt, 'step');
+  assert.equal(dialog.querySelector('.job-change-to').textContent, 'PPlanner', 'a step with no agent of its own sends the idea to the planner');
   assert.ok(dialog.querySelector('#job-retry'), 'the plain retry is still there for a transient failure');
 });
 
-test('a finished, dropped or cleaning-up sub-job offers no moves at all', (t) => {
+test('what a human is looking at, and what a request is pinned to, per view', (t) => {
   const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
-  assert.deepEqual(movesFor(job, { ...sub('api'), stage: 'done' }), []);
-  assert.deepEqual(movesFor(job, { ...sub('api'), stage: 'cleanup' }), []);
-  assert.deepEqual(movesFor(job, { ...sub('api'), stage: 'pr', cancelledAt: 1 }), []);
-  // Merged: the fix is a new PR, not a new commit here, and the order is settled.
-  assert.deepEqual(movesFor(job, { ...sub('api'), stage: 'deployment' }).map((m) => m.id), ['split-out', 'new-ticket', 'drop', 'mark']);
-  // Neither agentless kind has a repository, so neither offers a move that adds a PR.
-  assert.deepEqual(movesFor(job, { ...sub('api'), kind: 'session', stage: 'session' }).map((m) => m.id), ['fix-here', 'reorder', 'drop', 'mark']);
-  assert.deepEqual(movesFor(job, { ...sub('api'), kind: 'human', stage: 'human' }).map((m) => m.id), ['reorder', 'drop'], 'the HUMAN result form owns Mark done');
+  const at = (extra) => changeView(job, { ...sub('api'), ...extra });
+  assert.equal(at({ stage: 'done' }), null); assert.equal(at({ stage: 'cleanup' }), null); assert.equal(at({ stage: 'pr', cancelledAt: 1 }), null);
+  assert.deepEqual(at({ stage: 'pr', pr: { head: 'h1' } }), { at: 'pr', ref: 'h1' });
+  assert.deepEqual(at({ stage: 'review', state: 'verified', ready: { receiptId: 'run_4' } }), { at: 'code', ref: 'run_4' });
+  assert.deepEqual(at({ stage: 'review', state: 'approved', ready: { receiptId: 'run_4' } }), { at: 'code', ref: 'run_4' });
+  assert.deepEqual(at({ kind: 'session', stage: 'review', result: { receiptId: 'run_5' } }), { at: 'session', ref: 'run_5' });
+  assert.deepEqual(at({ kind: 'session', stage: 'session', state: 'queued' }), { at: 'step', ref: 'session/queued' });
+  assert.deepEqual(at({ kind: 'human', stage: 'human', state: 'waiting' }), { at: 'step', ref: 'human/waiting' });
+  assert.deepEqual(at({ stage: 'deployment', state: 'watching' }), { at: 'step', ref: 'deployment/watching' });
+  assert.deepEqual(at({ kind: 'write', stage: 'review', state: 'verified' }), { at: 'write', ref: 'review/verified' });
+  assert.deepEqual(changeView({ ...job, stage: 'planning', plan: { subJobs: [] }, revision: 7 }, null), { at: 'plan', ref: '7' });
+  assert.deepEqual(changeView(job, null), { at: 'job', ref: 'job' });
+  assert.deepEqual(changeView({ ...job, replan: { proposal: { id: 'run_8' } } }, null), { at: 'proposal', ref: 'run_8' });
+  assert.equal(changeView({ ...job, cancelledAt: 1 }, null), null); assert.equal(changeView({ ...job, stage: 'backlog' }, null), null);
 });
 
-test('Accept red appears only beside a red pipeline, says which side of the merge it acts on, and sends just the note', (t) => {
+test('a red run the human accepted reads as landing or merging', (t) => {
   const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
   const redPr = { url: 'https://github.com/org/repo/pull/1', head: 'h1', checkStatus: 'failing', checks: [{ name: 'e2e', state: 'FAILURE' }, { name: 'lint', state: 'SUCCESS' }] };
-  assert.equal(movesFor(job, { ...sub('api'), stage: 'pr', pr: { ...redPr, checkStatus: 'pending' } }).find((m) => m.id === 'accept-red'), undefined);
-  assert.equal(movesFor(job, { ...sub('api'), stage: 'pr', pr: { ...redPr, dirty: true } }).find((m) => m.id === 'accept-red'), undefined, 'a conflict cannot be waved through');
-  assert.equal(movesFor(job, { ...sub('api'), stage: 'pr', pr: redPr, acceptedRed: { ref: 'h1' } }).find((m) => m.id === 'accept-red'), undefined, 'already accepted at this head');
-  assert.equal(movesFor(job, { ...sub('api'), stage: 'pr', pr: redPr }).find((m) => m.id === 'accept-red').blurb, 'Merge this PR as it stands, red checks and all.');
   const landing = { ...sub('api'), stage: 'deployment', pr: { ...redPr, checkStatus: 'passing', mergeCommit: 'abc' }, deploymentResult: { status: 'failing', runs: [{ workflow: 'Deploy', status: 'failing', url: 'https://github.com/org/repo/actions/runs/1' }], commit: 'abc' } };
-  assert.deepEqual(movesFor(job, landing).map((m) => m.id), ['split-out', 'new-ticket', 'drop', 'mark', 'accept-red']);
-  assert.equal(movesFor(job, landing).at(-1).blurb, 'Count the merge as landed despite the failing post-merge run.');
-  assert.equal(movesFor(job, { ...landing, recoveredBy: 'api-2' }).find((m) => m.id === 'accept-red'), undefined, 'awaiting its fix, not a pipeline');
   assert.deepEqual(jobStatus(job, { ...landing, acceptedRed: { ref: 'abc' }, error: null }), { tone: 'working', text: 'Red run accepted · landing' });
   assert.deepEqual(jobStatus(job, { ...sub('api'), stage: 'pr', pr: redPr, acceptedRed: { ref: 'h1' } }), { tone: 'working', text: 'Merging with red checks' });
-
-  job.subJobs = [{ ...sub('api'), stage: 'pr', pr: redPr, error: 'Automatic repair limit reached. Review changes, then retry if needed.' }];
-  f.view.update(f.data);
-  const form = openMove(f, 'api', 'accept-red');
-  assert.deepEqual([...form.querySelectorAll('.job-checks li')].map((li) => li.textContent.trim()), ['× e2e'], 'only the red checks are listed');
-  assert.match(form.textContent, /Merges head h1 with the checks as they are/);
-  assert.equal(form.querySelector('button.primary').textContent, 'Merge anyway');
-  form.elements.note.value = ' e2e is flaky ';
-  form.dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'accept-red', note: 'e2e is flaky' });
-  job.subJobs = [{ ...landing, check: 'helm shows it', error: 'Post-merge run failed: Deploy' }];
-  f.view.update(f.data);
-  const landingForm = openMove(f, 'api', 'accept-red');
-  assert.match(landingForm.textContent, /Counts merge commit abc as landed, then runs the plan’s check/);
-  assert.equal(landingForm.querySelector('button.primary').textContent, 'Count it as landed');
-  landingForm.dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'accept-red' });
 });
 
-const openMove = (f, subId, move) => { f.q(`.job-plate-graph [data-sub="${subId}"]`).dispatchEvent(f.event('click')); f.q(`.job-move[data-move="${move}"]`).click(); return f.q('#job-move-form'); };
-
-test('Fix here hands the next session a note and nothing else', (t) => {
+test('Request changes sends the text pinned to the PR head that was on screen, and nothing else', (t) => {
   const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
   job.subJobs = [{ ...sub('api'), stage: 'pr', pr: { url: 'https://github.com/org/repo/pull/1', head: 'h1', checkStatus: 'failing', checks: [] } }];
   f.view.update(f.data);
-  const form = openMove(f, 'api', 'fix-here');
-  form.elements.note.value = '  Pin the client to v3  ';
-  form.dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'fix-here', note: 'Pin the client to v3' });
+  f.q('.job-plate-graph [data-sub="api"]').dispatchEvent(f.event('click'));
+  const box = f.q('.job-change');
+  const send = f.q('[data-change-send]');
+  assert.equal(send.disabled, true, 'nothing to send yet');
+  const text = box.querySelector('textarea'); text.value = '  Pin the client to v3  '; text.dispatchEvent(f.event('input'));
+  assert.equal(send.disabled, false);
+  job.subJobs[0].pr.head = 'h2';
+  send.click();
+  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'request-change', at: 'pr', ref: 'h1', text: 'Pin the client to v3' }, 'pinned to h1, the head that was read, even though a new one has landed since');
 });
 
-test('Split out asks for a whole PR and where it lands; a merged sub-job is not asked where', (t) => {
+test('a change being typed is not redrawn away by a live tick, and an escaped agent title stays escaped', (t) => {
   const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
-  job.subJobs = [{ ...sub('api'), stage: 'pr', pr: { url: 'https://github.com/org/repo/pull/1', head: 'h1', checkStatus: 'failing', checks: [] } },
-    { ...sub('merged'), stage: 'deployment', pr: { url: 'https://github.com/org/repo/pull/2', mergeCommit: 'abc', checkStatus: 'passing', checks: [] } }];
-  f.view.update(f.data);
-  const form = openMove(f, 'api', 'split-out');
-  form.elements.title.value = 'Sync the proto files';
-  form.elements.brief.value = 'Regenerate the protos and land them on their own';
-  form.elements.check.value = 'proto lint passes';
-  form.querySelector('[name="position"][value="before"]').checked = true;
-  form.elements.note.value = 'Land this first';
-  form.dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'split-out', title: 'Sync the proto files', brief: 'Regenerate the protos and land them on their own', position: 'before', check: 'proto lint passes', note: 'Land this first' });
-  f.q('#job-move-back').click(); f.q('#job-dialog').close();
-  const merged = openMove(f, 'merged', 'split-out');
-  assert.equal(merged.querySelector('[name="position"]'), null, 'merged: the new PR simply lands next');
-  assert.match(f.q('#job-dialog').textContent, /everything already waiting on this one waits for it instead/);
-  merged.elements.title.value = 'Guard empty payloads'; merged.elements.brief.value = 'Reject an empty body with a 400';
-  merged.dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'merged', action: 'split-out', title: 'Guard empty payloads', brief: 'Reject an empty body with a 400', position: 'after' });
-});
-
-test('New ticket carries the story as well as the PR, and leaves out what was not filled in', (t) => {
-  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
-  job.subJobs = [{ ...sub('api'), stage: 'implementation' }]; f.view.update(f.data);
-  const form = openMove(f, 'api', 'new-ticket');
-  form.elements.storyTitle.value = 'Sign-ins are audited';
-  form.elements.project.value = 'SEC';
-  form.elements.title.value = 'Emit an audit event';
-  form.elements.brief.value = 'Write one audit row per sign-in';
-  form.dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'new-ticket', storyTitle: 'Sign-ins are audited', title: 'Emit an audit event', brief: 'Write one audit row per sign-in', project: 'SEC' },
-    'an untouched key, check, position or note is left out rather than sent empty');
-  f.q('#job-move-back').click();
-  const again = f.q('.job-move[data-move="new-ticket"]'); again.click();
-  const second = f.q('#job-move-form');
-  second.elements.storyTitle.value = 'Existing work'; second.elements.key.value = 'AUTH-9';
-  second.elements.title.value = 'Reuse the audit writer'; second.elements.brief.value = 'Call the shared writer';
-  second.querySelector('[name="position"][value="after"]').checked = true;
-  second.dispatchEvent(f.event('submit'));
-  assert.equal(f.sent.at(-1).key, 'AUTH-9'); assert.equal(f.sent.at(-1).position, 'after');
-});
-
-test('Reorder sends the whole new prerequisite list, from the same checkboxes the plan graph uses', (t) => {
-  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
-  job.subJobs = [{ ...sub('api'), stage: 'implementation' }, { ...sub('web'), stage: 'implementation' }, { ...sub('gone'), stage: 'cleanup', cancelledAt: 1 }];
-  f.view.update(f.data);
-  const form = openMove(f, 'api', 'reorder');
-  assert.deepEqual([...form.querySelectorAll('[data-dep]')].map((c) => c.value), ['web'], 'a dropped sub-job is not a prerequisite anyone can pick');
-  form.querySelector('[data-dep][value="web"]').checked = true;
-  form.dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'reorder', after: ['web'] });
-});
-
-test('Drop is the old cancel: confirmed first, and it sends nothing but the move', (t) => {
-  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
-  job.subJobs = [{ ...sub('api'), stage: 'pr', pr: { url: 'https://github.com/org/repo/pull/1', checkStatus: 'pending' } }, { ...sub('web', ['api']), stage: 'implementation' }];
-  job.runs = [{ id: 'r1', subJobId: 'api', phase: 'repair', stopped: false }];
-  f.view.update(f.data);
-  openMove(f, 'api', 'drop');
-  assert.equal(f.sent.length, 0, 'dropping needs a confirmation first');
-  assert.match(f.q('#job-dialog').textContent, /running step is stopped/); assert.match(f.q('#job-dialog').textContent, /pull request stays open/);
-  f.q('#job-move-back').click(); assert.ok(f.q('.job-move[data-move="drop"]'), 'backing out returns to the detail view');
-  f.q('.job-move[data-move="drop"]').click(); f.q('[data-drop]').click();
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'drop' });
-  job.subJobs[0] = { ...job.subJobs[0], stage: 'cleanup', cancelledAt: 1 }; job.runs = []; f.view.update(f.data);
-  assert.equal(jobStatus(job, job.subJobs[0]).text, 'Dropped · cleaning up');
-  assert.equal(jobNeedsReview(job, job.subJobs[1]), true); assert.match(jobStatus(job, job.subJobs[1]).text, /dropped sub-job/);
-  f.q('[data-sub="api"]').dispatchEvent(f.event('click')); assert.equal(f.q('.job-moves'), null, 'a dropped sub-job has no moves left');
-  job.subJobs[0].stage = 'done'; f.view.update(f.data);
-  assert.equal(jobStatus(job, job.subJobs[0]).text, 'Dropped');
-  assert.match(f.q('#jobs-delivered').textContent, /0 delivered/);
+  job.subJobs = [{ ...sub('api'), title: 'Sync <b>protos</b>', stage: 'pr', pr: { url: 'https://github.com/org/repo/pull/1', head: 'h1', checkStatus: 'pending', checks: [] } }];
+  f.view.update(f.data); f.q('.job-plate-graph [data-sub="api"]').dispatchEvent(f.event('click'));
+  const text = f.q('.job-change textarea'); text.value = 'Half a thought';
+  job.subJobs[0].pr.checkStatus = 'passing'; f.view.update(f.data);
+  assert.equal(f.q('.job-change textarea').value, 'Half a thought', 'the draft survives the tick');
+  assert.equal(f.q('.job-change textarea'), text, 'the same element: nothing was repainted');
+  assert.ok(!f.q('#job-dialog').innerHTML.includes('<b>protos</b>'));
 });
 
 test('Cancel job is confirmed first, sends only the job action, and a cancelled job reads as cancelled rather than delivered', (t) => {
@@ -362,35 +288,14 @@ test('a job cancelled before it had sub-jobs keeps a card in Done and never offe
   assert.equal(f.q('.job-plate .job-status').textContent, 'Cancelled');
 });
 
-test('Mark position offers only the claims this stage can accept, and insists on the URL for an open PR', (t) => {
-  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
-  job.subJobs = [{ ...sub('api'), stage: 'implementation' }, { ...sub('open'), stage: 'pr', pr: { url: 'https://github.com/org/repo/pull/1', head: 'h1', checkStatus: 'pending', checks: [] } }];
-  f.view.update(f.data);
-  const form = openMove(f, 'api', 'mark');
-  assert.deepEqual([...form.querySelectorAll('[name="position"]')].map((r) => r.value), ['pr', 'done']);
-  form.dispatchEvent(f.event('submit'));
-  assert.equal(f.sent.length, 0); assert.match(f.q('#job-move-error').textContent, /Paste the pull request URL/);
-  form.elements.url.value = 'https://github.com/org/repo/pull/12';
-  form.dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'mark', position: 'pr', url: 'https://github.com/org/repo/pull/12' });
-  f.q('#job-move-back').click(); f.q('#job-dialog').close();
-  const opened = openMove(f, 'open', 'mark');
-  assert.deepEqual([...opened.querySelectorAll('[name="position"]')].map((r) => r.value), ['merged', 'done']);
-  assert.equal(opened.elements.url, undefined, 'the PR is already known');
-  opened.querySelector('[name="position"][value="done"]').checked = true;
-  opened.elements.note.value = 'Shipped in last week’s release';
-  opened.dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'open', action: 'mark', position: 'done', note: 'Shipped in last week’s release' });
-});
-
-test('the moves a job has taken fold into a collapsed history that stays open across ticks', (t) => {
+test('the interventions a job has seen fold into a collapsed history that stays open across ticks', (t) => {
   const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
   job.subJobs = [{ ...sub('api'), stage: 'pr', pr: { url: 'https://github.com/org/repo/pull/1', head: 'h1', checkStatus: 'pending', checks: [] } }];
   job.moves = [{ id: 'mv_1', at: 1757400000000, subJobId: 'api', move: 'fix-here', detail: 'Fix here on “Deliver api”' },
     { id: 'mv_2', at: 1757400600000, subJobId: 'api', move: 'split-out', detail: 'Split out “<proto> sync” to land before this' }];
   f.view.update(f.data); f.q('.job-plate-open').click();
   const history = f.q('.job-moves-history');
-  assert.equal(history.open, false); assert.match(history.querySelector('summary').textContent, /Moves\s*2/);
+  assert.equal(history.open, false); assert.match(history.querySelector('summary').textContent, /History\s*2/);
   assert.deepEqual([...history.querySelectorAll('.job-move-log span')].map((e) => e.textContent), ['Split out “<proto> sync” to land before this', 'Fix here on “Deliver api”'], 'newest first');
   assert.ok(!history.innerHTML.includes('<proto>'), 'a move line is agent-adjacent text: escaped');
   assert.equal(history.querySelectorAll('.job-move-log small').length, 2, 'each move says when it was made');
@@ -602,7 +507,7 @@ test('the footer checkpoints are buttons: a switch counts from the next gate, ke
   footerButton(f, 'reviewPlan').click();
   assert.equal(f.sent.length, before, 'a locked checkpoint sends nothing');
   code().dispatchEvent(new f.window.Event('pointerenter'));
-  assert.match(footerHint(f), /Code: You review You read each PR’s diff before it’s committed\. Click for Auto\./);
+  assert.match(footerHint(f), /Code: You review You see each PR working and read its diff before it’s committed\. Click for Auto\./);
   code().click();
   assert.deepEqual(reviewSent(f), { type: 'job-action', id: 'job1', action: 'set-review', field: 'reviewCode', you: false });
   assert.deepEqual([code().className, code().getAttribute('aria-pressed'), code().getAttribute('aria-busy')], ['job-flag auto', 'false', 'true'], 'shown at once, busy until the job confirms it');
@@ -658,7 +563,7 @@ test('Plan switched to Auto on a drafted plan approves the draft on display; a f
   const job = f.data.jobs[0]; job.stage = 'done'; job.subJobs = [{ id: 'spike', kind: 'session', title: 'Run spike', after: [], brief: 'Do it here', sessions: [], repairs: [], stage: 'done' }]; f.view.update(f.data);
   f.view.openDetail('job1');
   assert.deepEqual([...document.querySelectorAll('.job-detail-footer [data-review]')].map((b) => [b.dataset.review, b.getAttribute('aria-disabled')]),
-    [['reviewPlan', 'true'], ['reviewCode', 'true'], ['reviewMerge', 'true'], ['reviewSessions', 'true']]);
+    [['reviewPlan', 'true'], ['reviewCode', 'true'], ['reviewMerge', 'true'], ['reviewSessions', 'true'], ['reviewRed', 'true']]);
   assert.match(footerButton(f, 'reviewMerge').getAttribute('aria-label'), /The job is finished/);
 });
 
@@ -670,7 +575,7 @@ test('the Plan checkpoint can be set to Auto in the new-job form, and is a flag 
   assert.equal(plan().title, 'Plan: You review. You approve the plan before any ticket, PR or session starts');
   assert.ok(plan().classList.contains('you') && plan().querySelector('.job-flag-badge'), 'filled amber with the hand badge');
   assert.deepEqual([...document.querySelectorAll('.job-detail-footer .job-flag')].map((e) => [e.getAttribute('aria-label').split('.')[0], e.className]),
-    [['Plan: You review', 'job-flag you'], ['Code: You review', 'job-flag you'], ['Merge: You review', 'job-flag you']], 'no session sub-jobs, so no Session results flag');
+    [['Plan: You review', 'job-flag you'], ['Code: You review', 'job-flag you'], ['Merge: You review', 'job-flag you'], ['Red steps: You decide', 'job-flag you']], 'no session sub-jobs, so no Session results flag');
   f.q('#job-dialog').close();
   job.reviewPlan = false; job.reviewMerge = false; f.view.update(f.data);
   f.q('.job-plate-open[data-job=\"job1\"]').click();
@@ -768,16 +673,16 @@ test('new job is a brief beside a property sidebar, and the brief is the descrip
   assert.deepEqual([...props.querySelectorAll('legend')].map((l) => l.textContent), ['Task', 'Agent', 'Sandbox', 'Images', 'After delivery']);
   assert.deepEqual([...brief.querySelectorAll('legend')].map((l) => l.textContent), ['Review checkpoints']);
   for (const name of ['taskId', 'newTaskName', 'agent', 'model', 'effort', 'shareImages', 'updateMain']) assert.ok(props.contains(form.querySelector(`[name="${name}"]`)), `${name} lives in the sidebar`);
-  for (const name of ['reviewPlan', 'reviewCode', 'reviewMerge', 'reviewSessions', 'reviewWrites']) assert.ok(brief.contains(form.querySelector(`[name="${name}"]`)), `${name} is a tile under the brief`);
+  for (const name of ['reviewPlan', 'reviewCode', 'reviewMerge', 'reviewSessions', 'reviewWrites', 'reviewRed']) assert.ok(brief.contains(form.querySelector(`[name="${name}"]`)), `${name} is a tile under the brief`);
   assert.ok(props.querySelector('#job-pick').querySelector('.pick-ticket') && props.querySelector('#job-pick .pick-meter'), 'the picker is a ticket with an effort meter in the sidebar');
   assert.deepEqual([...brief.querySelectorAll('.job-review')].map((r) => [r.querySelector('input').name, r.querySelector('.job-review-name').firstChild.textContent, form.elements[r.dataset.checkpoint].checked, r.querySelector('small').textContent]),
-    [['reviewPlan', 'Plan', true, 'You approve the plan before any ticket, PR or session starts'], ['reviewCode', 'Code', true, 'You read each PR’s diff before it’s committed'], ['reviewMerge', 'Merge', true, 'You approve each PR once its checks pass'], ['reviewSessions', 'Session results', true, 'You approve each session’s receipt before it counts as done'], ['reviewWrites', 'Writes', false, 'Each write is made by its session, with a receipt']]);
+    [['reviewPlan', 'Plan', true, 'You approve the plan before any ticket, PR or session starts'], ['reviewCode', 'Code', true, 'You see each PR working and read its diff before it’s committed'], ['reviewMerge', 'Merge', true, 'You approve each PR once its checks pass'], ['reviewSessions', 'Session results', true, 'You approve each session’s receipt before it counts as done'], ['reviewWrites', 'Writes', false, 'Each write is made by its session, with a receipt'], ['reviewRed', 'Red steps', true, 'Wrangler proposes a fix for a red step and waits for you to decide']]);
   assert.deepEqual([...props.querySelectorAll('.job-toggle')].map((l) => [l.querySelector('input').name, l.querySelector('input').checked, l.querySelector('small')?.textContent]),
     [['shareImages', true, 'every session on the job sees them, not just planning'], ['updateMain', false, undefined]]);
   assert.match(form.querySelector('.job-create-foot').textContent, /nothing touches Jira until you approve/);
   form.elements.intent.value = 'Deliver it';
   form.dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent[0], { type: 'job-create', start: true, job: { intent: 'Deliver it', agent: 'claude', model: 'sonnet', effort: '', reviewPlan: true, reviewCode: true, reviewMerge: true, reviewSessions: true, reviewWrites: false, sandbox: 'auto', writableDirs: [], updateMain: false, images: [], shareImages: true, taskId: null } });
+  assert.deepEqual(f.sent[0], { type: 'job-create', start: true, job: { intent: 'Deliver it', agent: 'claude', model: 'sonnet', effort: '', reviewPlan: true, reviewCode: true, reviewMerge: true, reviewSessions: true, reviewWrites: false, reviewRed: true, sandbox: 'auto', writableDirs: [], updateMain: false, images: [], shareImages: true, taskId: null } });
 });
 
 test('new jobs need only an outcome and leave repositories to planning', (t) => {
@@ -805,7 +710,7 @@ test('the plan review shows discovered checkout paths before approval', (t) => {
 
 test('Automation settings holds the review defaults New job starts from', (t) => {
   const f = fixture(t);
-  assert.deepEqual(reviewDefaultsOf({}), { reviewPlan: true, reviewCode: true, reviewMerge: true, reviewSessions: true, reviewWrites: false }, 'a graph from before the setting seeds the original form');
+  assert.deepEqual(reviewDefaultsOf({}), { reviewPlan: true, reviewCode: true, reviewMerge: true, reviewSessions: true, reviewWrites: false, reviewRed: true }, 'a graph from before the setting seeds the original form');
   f.q('#jobs-settings').click(); const form = f.q('#job-settings-form');
   const plan = form.querySelector('[data-checkpoint="reviewPlan"]'); const note = plan.querySelector('.job-review-note');
   assert.equal(form.querySelector('.job-settings-review legend').textContent, 'Review checkpoints for new jobs');
@@ -815,10 +720,10 @@ test('Automation settings holds the review defaults New job starts from', (t) =>
   assert.equal(form.elements.reviewPlan.getAttribute('aria-label'), 'Plan: Auto');
   form.elements.reviewWrites.checked = true; form.dispatchEvent(f.event('submit'));
   const reviewDefaults = f.sent.at(-1).patch.reviewDefaults;
-  assert.deepEqual(reviewDefaults, { reviewPlan: false, reviewCode: true, reviewMerge: true, reviewSessions: true, reviewWrites: true });
+  assert.deepEqual(reviewDefaults, { reviewPlan: false, reviewCode: true, reviewMerge: true, reviewSessions: true, reviewWrites: true, reviewRed: true });
   f.data.settings.reviewDefaults = reviewDefaults; f.view.update(f.data);
   f.q('#job-new').click(); const create = f.q('#job-create-form');
-  assert.deepEqual(CHECKPOINTS.map((cp) => create.elements[cp.field].checked), [false, true, true, true, true]);
+  assert.deepEqual(CHECKPOINTS.map((cp) => create.elements[cp.field].checked), [false, true, true, true, true, true]);
   assert.equal(create.querySelector('.job-review-note'), null, 'New job is per job, so it carries no warning');
   assert.equal(create.querySelector('[data-checkpoint="reviewPlan"] small').textContent, 'Work starts as soon as the plan is drafted');
 });
@@ -830,7 +735,7 @@ test('global concurrency, pause and repair limits are explicit controls, and no 
   f.q('#jobs-settings').click(); const form = f.q('#job-settings-form');
   assert.equal(form.elements.maxRunMinutes, undefined, 'a step ends with a receipt or an idle session, not a timeout');
   form.elements.maxRepairs.value = '1'; form.dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent.at(-1).patch, { maxRepairs: 1, deploymentStaleMinutes: 30, ideApp: 'IntelliJ IDEA', plateArt: 'quiet', reviewDefaults: { reviewPlan: true, reviewCode: true, reviewMerge: true, reviewSessions: true, reviewWrites: false } });
+  assert.deepEqual(f.sent.at(-1).patch, { maxRepairs: 1, maxReplans: 2, deploymentStaleMinutes: 30, ideApp: 'IntelliJ IDEA', plateArt: 'quiet', reviewDefaults: { reviewPlan: true, reviewCode: true, reviewMerge: true, reviewSessions: true, reviewWrites: false, reviewRed: true } });
 });
 
 test('dependency waves, session waits and escaped titles remain compact', () => {
@@ -891,9 +796,9 @@ test('a reported session needs you, a running one spins, and approval is pinned 
   assert.match(f.q('#job-dialog').textContent, /Schema documented/);
   f.q('[data-action="approve-session"]').click();
   assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'spike', action: 'approve-session', head: undefined, sessionReceiptId: 'receipt9' });
-  f.q('#job-revise-session').click();
-  const form = f.q('#job-dialog form'); form.elements.feedback.value = 'Check staging too'; form.dispatchEvent(f.event('submit'));
-  assert.equal(f.sent.at(-1).action, 'revise-session'); assert.equal(f.sent.at(-1).feedback, 'Check staging too');
+  assert.equal(f.q('#job-revise-session'), null, 'Request changes is the box on the review, not a button that opens a dialog');
+  const text = f.q('.job-change textarea'); text.value = 'Check staging too'; text.dispatchEvent(f.event('input')); f.q('[data-change-send]').click();
+  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'spike', action: 'request-change', at: 'session', ref: 'receipt9', text: 'Check staging too' });
 });
 
 const humanSub = (id, after = []) => ({ id, kind: 'human', title: `Sign ${id}`, storyId: 'story', jiraKey: 'AUTH-1', after, brief: 'Click approve in the vendor console', sessions: [], repairs: [] });
@@ -1278,7 +1183,7 @@ test('a merged sub-job with no post-merge run turns amber, joins Needs me and sa
   assert.ok(f.q('.job-plate-graph .node[data-sub="api"]').classList.contains('tone-warn')); assert.equal(f.q('[data-board="job1"] .job-status').textContent, 'Nothing deployed');
   f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
   assert.match(hint(f), /No GitHub Actions run has started for merge commit abcdef12 in 40 min/);
-  assert.match(hint(f), /Mark position: done/, 'it says what the human can do about it');
+  assert.match(hint(f), /Request changes and say so/, 'it says what the human can do about it');
   watching.deploymentStale = { since: watching.mergedAt, cancelled: ['Build'] }; f.view.update(f.data);
   assert.match(hint(f), /Build was cancelled on merge commit abcdef12 and no later run that includes it has started in 40 min/);
   assert.equal(f.q('.job-event b').textContent, 'Nothing deployed');
@@ -1293,12 +1198,10 @@ test('the stale window is an explicit automation setting', (t) => {
   assert.equal(f.sent.at(-1).patch.deploymentStaleMinutes, 90);
 });
 
-test('Fix here on an open PR under code review reads as a fix queued in Work, and review copy says push rather than open', (t) => {
+test('a change requested on an open PR under code review reads as a fix queued in Work, and review copy says push rather than open', (t) => {
   const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
   const pr = { url: 'https://github.com/org/repo/pull/1', head: 'h1', checkStatus: 'passing', checks: [] };
   job.subJobs = [{ ...sub('api'), stage: 'pr', pr }];
-  assert.deepEqual(movesFor(job, job.subJobs[0]).find((m) => m.id === 'fix-here').blurb, 'Back to work on this PR. You review the diff before it is pushed.');
-  assert.equal(movesFor({ ...job, reviewCode: false }, job.subJobs[0]).find((m) => m.id === 'fix-here').blurb, 'New commit on this PR, with your note.');
   job.subJobs = [{ ...sub('api'), stage: 'implementation', state: 'queued', pr, note: 'Pin the client to v3' }];
   f.view.update(f.data);
   assert.deepEqual(jobStatus(job, job.subJobs[0]), { tone: 'working', text: 'Fix queued' });
@@ -1334,18 +1237,19 @@ test('the dialog chord is the board\u2019s: plain Cmd or Ctrl with Enter, and no
   assert.equal(isPrimaryActionKey({ key: 'Enter', ctrlKey: true, altKey: true }), false);
 });
 
-test('Cmd+Enter in a move form submits it, honouring required exactly as the button does', (t) => {
+test('Cmd+Enter in Request changes sends it, and waits for words exactly as the button does', (t) => {
   const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
   job.subJobs = [{ ...sub('api'), stage: 'pr', pr: { url: 'https://github.com/org/repo/pull/1', head: 'h1', checkStatus: 'failing', checks: [] } }];
   f.view.update(f.data);
-  const form = openMove(f, 'api', 'fix-here');
-  chord(f, form.elements.note);
-  assert.equal(f.sent.length, 0, 'an empty required note holds the chord back');
-  form.elements.note.value = '  Pin the client to v3  ';
-  chord(f, form.elements.note, { shiftKey: true });
+  f.q('.job-plate-graph [data-sub="api"]').dispatchEvent(f.event('click'));
+  const text = f.q('.job-change textarea');
+  chord(f, text);
+  assert.equal(f.sent.length, 0, 'an empty box holds the chord back');
+  text.value = '  Pin the client to v3  '; text.dispatchEvent(f.event('input'));
+  chord(f, text, { shiftKey: true });
   assert.equal(f.sent.length, 0);
-  chord(f, form.elements.note);
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'fix-here', note: 'Pin the client to v3' });
+  chord(f, text);
+  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'request-change', at: 'pr', ref: 'h1', text: 'Pin the client to v3' });
 });
 
 test('the chord carries the primary submitter, so a new job starts planning rather than parking', (t) => {
@@ -1364,11 +1268,11 @@ test('the chord fires a detail\u2019s primary action, and stops at a disabled or
   assert.equal(f.sent.length, 0);
   chord(f, f.q('#job-dialog'));
   assert.equal(f.sent.at(-1).action, 'approve-merge'); assert.equal(f.sent.at(-1).head, 'head1');
-  // Drop is a confirmation with nothing but destructive buttons: keyboard-inert.
+  // Cancel job is a confirmation with nothing but destructive buttons: keyboard-inert.
   const before = f.sent.length;
-  f.q('[data-sub="api"]').dispatchEvent(f.event('click')); f.q('.job-move[data-move="drop"]').click();
+  f.q('.job-plate-open').click(); f.q('#job-cancel').click();
   assert.equal(primaryAction(f.q('#job-dialog')), null);
-  chord(f, f.q('#job-drop-form'));
+  chord(f, f.q('#job-cancel-form'));
   assert.equal(f.sent.length, before); assert.equal(f.q('#job-dialog').open, true, 'the chord neither submits nor closes it');
 });
 
@@ -1411,7 +1315,7 @@ test('the job dialog’s one button merges the green PR waiting on you, pinned t
   assert.equal(primaryAction(f.q('#job-dialog')), null, 'opening a sub-job is not a chord action');
   f.q('#job-dialog .job-actions button.primary').click();
   assert.equal(f.q('#job-dialog h2').textContent, 'Deliver api');
-  assert.equal(f.q('.job-overflow').open, true, 'something went wrong, so the moves start unfolded');
+  assert.ok(f.q('.job-change').classList.contains('is-open'), 'something went wrong, so the box starts open');
 });
 
 test('a folded section stays open across live ticks', (t) => {
@@ -1423,30 +1327,31 @@ test('a folded section stays open across live ticks', (t) => {
   details.open = true; details.dispatchEvent(f.event('toggle'));
   f.view.update(f.data);
   assert.equal(f.q('[data-keep="details"]').open, true);
-  assert.equal(f.q('.job-overflow').open, false, 'nothing went wrong: the moves stay behind the overflow');
+  assert.equal(f.q('.job-change').classList.contains('is-open'), false, 'nothing went wrong: the box rests as one line');
 });
 
 // --- Changing the plan of a running job ---
 
-test('Change plan on a running job asks for a proposal; while it is pending new work reads as held and Discard is offered', (t) => {
+test('Add idea on a running job asks the planner for a proposal; the sent idea stays as a bubble; while it is pending new work reads as held and Discard is offered', (t) => {
   const f = fixture(t); const [job] = f.data.jobs; job.stage = 'active';
   job.subJobs = [{ ...sub('api'), stage: 'done', deployed: { at: 1, checks: ['ok'] } }, { ...sub('web', ['api']), stage: 'implementation', state: 'queued' }];
   f.view.update(f.data);
   f.q('[data-board="job1"] .job-plate-open').click();
-  f.q('#job-refine').click();
-  assert.equal(f.q('#job-dialog h2').textContent, 'Change the plan');
-  assert.match(f.q('#job-dialog').textContent, /nothing changes until you approve the proposal/);
-  f.q('#job-feedback textarea').value = 'Split web in two';
-  f.q('#job-feedback').dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: undefined, action: 'replan', feedback: 'Split web in two' });
+  assert.equal(f.q('#job-refine'), null, 'there is no separate Change plan dialog: the box is on the job');
+  assert.equal(f.q('.job-change textarea').placeholder, 'Add an idea for the planner…');
+  assert.match(f.q('.job-change').textContent, /Sends feedback back to a step or changes the plan\. Nothing changes until you approve\./);
+  const text = f.q('.job-change textarea'); text.value = 'Split web in two'; text.dispatchEvent(f.event('input')); f.q('[data-change-send]').click();
+  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: undefined, action: 'request-change', at: 'job', ref: 'job', text: 'Split web in two' });
 
   job.replan = { feedback: 'Split web in two', at: 1, proposal: null, previous: null };
   job.runs = [{ id: 'plan2', subJobId: null, phase: 'planning', stopped: false }];
-  f.view.update(f.data); f.q('[data-board="job1"] .job-plate-open').click();
+  f.view.created({ event: 'job-action-complete', jobId: 'job1', action: 'request-change' }); f.view.update(f.data);
+  assert.equal(f.q('#job-dialog').open, true);
   assert.equal(f.q('[data-board="job1"] .job-status').textContent, 'Re-planning');
   assert.equal(jobStatus(job, job.subJobs[1]).text, 'Held for the plan change');
   assert.match(f.q('.job-replan-ask').textContent, /Split web in two/);
-  assert.equal(f.q('#job-refine'), null, 'one change at a time');
+  assert.equal(f.q('.job-change'), null, 'one change at a time');
+  assert.equal(f.q('.job-sent .job-sent-bubble').textContent, 'Split web in two', 'what was sent stays where the box was');
   f.q('[data-action="discard-replan"]').click();
   assert.equal(f.sent.at(-1).action, 'discard-replan');
 });
@@ -1462,7 +1367,7 @@ test('a pending plan change freezes a sub-job awaiting review: held, not needs-y
   assert.equal(jobNeedsReview(job, job.subJobs[0]), false); assert.equal(f.q('#jobs-review-count').textContent, '');
   f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
   assert.equal(f.q('[data-action="approve-code"]'), null);
-  assert.equal(f.q('.job-overflow'), null, 'every move is refused while the change is pending');
+  assert.equal(f.q('.job-change'), null, 'a step’s own agent is refused while the change is pending');
   assert.match(f.q('#job-dialog').textContent, /Held for the plan change/);
   job.runs = [{ id: 'w', subJobId: 'api', phase: 'implementation', stopped: false, status: 'running' }];
   assert.notEqual(jobStatus(job, job.subJobs[0]).text, 'Held for the plan change', 'a step already running carries on');
@@ -1494,10 +1399,8 @@ test('a plan-change proposal locks landed work, marks removed work as cancelled 
   assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: undefined, action: 'approve-replan', proposalId: 'run_p' });
   f.q('[data-action="discard-replan"]').click();
   assert.equal(f.sent.at(-1).action, 'discard-replan');
-  f.q('#job-refine').click();
-  f.q('#job-feedback textarea').value = 'Keep web';
-  f.q('#job-feedback').dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: undefined, action: 'replan', feedback: 'Keep web' });
+  const text = f.q('.job-change textarea'); text.value = 'Keep web'; text.dispatchEvent(f.event('input')); f.q('[data-change-send]').click();
+  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: undefined, action: 'request-change', at: 'proposal', ref: 'run_p', text: 'Keep web' }, 'pinned to the proposal that was read');
 });
 
 test('a superseded sub-job reads as superseded, and its open PR stays linked from the job and the sub-job', (t) => {
@@ -1725,7 +1628,7 @@ test('a write waits on its session; a draft needs you, its panel the editor that
   assert.deepEqual([panel.querySelector('[name="on"]'), panel.querySelector('[name="review"]')], [null, null], 'in review only what it writes can change');
   assert.match(f.q('.job-write-spec').textContent, /By\s*Written by Run n-rev/);
   assert.deepEqual([...document.querySelectorAll('.job-actions button')].map((b) => b.textContent.trim()), ['Move in Jira', 'Skip']);
-  assert.deepEqual(movesFor(job, at('w-rev')).map((m) => m.id), ['drop', 'mark']);
+  assert.equal(f.q('.job-change').dataset.changeAt, 'write', 'a draft takes ideas too, pinned to where it stands'); assert.equal(f.q('.job-moves'), null);
   panel.requestSubmit();
   assert.deepEqual([f.sent.at(-1).action, f.sent.at(-1).subJobId, f.sent.at(-1).write], ['approve-write', 'w-rev', undefined], 'nothing changed: a plain approval');
   panel.querySelector('[name="to"]').value = ''; panel.querySelector('[name="comment"]').value = '';
@@ -1759,12 +1662,12 @@ test('a refused write shows its place\'s error with Retry and Pick another statu
   const at = (id) => job.subJobs.find((s) => s.id === id);
   assert.equal(jobStatus(job, at('n-dead')).text, 'Trigger dropped'); assert.equal(jobNeedsReview(job, at('n-dead')), true);
   assert.equal(jobStatus(job, at('w-there')).text, 'Already there');
-  assert.deepEqual(eventFor(job, at('w-fail')), { title: 'Jira refused the write', detail: 'Field Reviewer is required for this transition.', suggested: null });
+  assert.deepEqual(eventFor(job, at('w-fail')), { title: 'Jira refused the write', detail: 'Field Reviewer is required for this transition.' });
   f.q('[data-board="job1"] .job-plate-open').click(); f.q('[data-open-sub="w-fail"]').click();
   assert.match(f.q('.job-event').textContent, /Jira refused the write.*Field Reviewer is required/);
   assert.match(hint(f), /Retry once it allows it, pick another status \(either runs Run n again for it\)/);
   assert.deepEqual([...document.querySelectorAll('.job-actions button')].map((b) => b.textContent.trim()), ['Retry', 'Pick another status']);
-  assert.deepEqual([...document.querySelectorAll('.job-move')].map((b) => b.textContent), ['Drop', 'Mark done']);
+  assert.equal(document.querySelector('.job-moves'), null, 'no Moves menu on a refused write');
   f.q('#job-write-edit').click();
   assert.equal(f.q('#job-dialog h2').textContent, 'Pick another status');
   f.q('#job-move-back').click();
@@ -1778,25 +1681,7 @@ test('a refused write shows its place\'s error with Retry and Pick another statu
   assert.deepEqual([...document.querySelectorAll('.job-actions button')].map((b) => b.textContent.trim()), ['Retry', 'Pick another status'], 'a finished session still runs again for its writes alone');
   at('n').cancelledAt = 2; f.view.update(f.data);
   f.q('[data-open-job]').click(); f.q('[data-open-sub="w-fail"]').click();
-  assert.deepEqual([...document.querySelectorAll('.job-actions button')].map((b) => b.textContent.trim()), [], 'its session was dropped: only Mark done or Drop are left');
-});
-
-test('Mark done on a story\'s create asks for the ticket: a key, or a browse link it is read from', (t) => {
-  const f = fixture(t);
-  withWrites(f, [], { stage: 'active', subJobs: [sessionNode('n', { stage: 'session', state: 'queued' }),
-    jiraWrite('mk', 'n', { type: 'create' }, { storyId: 'story', jiraKey: null, stage: 'write', state: 'failed', error: 'Jira refused it' })] });
-  f.q('[data-board="job1"] .job-plate-open').click(); f.q('[data-open-sub="mk"]').click(); f.q('.job-move[data-move="mark"]').click();
-  const form = f.q('#job-move-form');
-  assert.ok(form.elements.ticket.required); assert.equal(form.elements.link, undefined);
-  form.elements.ticket.value = 'not a key';
-  form.dispatchEvent(f.event('submit'));
-  assert.equal(f.sent.length, 0); assert.match(f.q('#job-move-error').textContent, /ticket key/);
-  form.elements.ticket.value = 'AUTH-9';
-  form.dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'mk', action: 'mark', position: 'done', key: 'AUTH-9' });
-  form.elements.ticket.value = 'https://x.atlassian.net/browse/AUTH-9';
-  form.dispatchEvent(f.event('submit'));
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'mk', action: 'mark', position: 'done', link: 'https://x.atlassian.net/browse/AUTH-9' });
+  assert.deepEqual([...document.querySelectorAll('.job-actions button')].map((b) => b.textContent.trim()), [], 'its session was dropped: nothing runs it again');
 });
 
 const made = (id, type, by, what, extra = {}) => ({ id, kind: 'write', place: { type }, title: `Make ${what}`, by, after: [], action: { type: 'make', what }, sessions: [], repairs: [], ...extra });
@@ -1923,20 +1808,13 @@ test('plan review adds a place under a session and picks its type: a Slack post 
     ['report-write-2', { type: 'artifact' }, { type: 'make', what: 'p95 chart' }, undefined, 'report', 'Make p95 chart']]);
 });
 
-test('a made output is marked done with where it is; a Slack post in review asks to Post to Slack', (t) => {
+test('a Slack post in review asks to Post to Slack, with only its edited fields', (t) => {
   const f = fixture(t);
   placesJob(f, { k6: { state: 'failed', error: 'k6 was not installed' } });
   f.q('[data-board="job1"] .job-plate-open').click(); f.q('[data-open-sub="k6"]').click();
-  f.q('.job-move[data-move="mark"]').click();
-  const form = f.q('#job-move-form');
-  assert.equal(form.querySelector('[name="link"]').required, true);
-  form.querySelector('[name="link"]').value = 'k6.html'; form.requestSubmit();
-  assert.match(f.q('#job-move-error').textContent, /https:\/\/ or an absolute path/);
-  form.querySelector('[name="link"]').value = '/Users/me/k6.html'; form.requestSubmit();
-  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'k6', action: 'mark', position: 'done', link: '/Users/me/k6.html' });
   const [job] = f.data.jobs;
   Object.assign(job.subJobs.find((s) => s.id === 'post'), { stage: 'review', state: 'verified' }); f.view.update(f.data);
-  f.q('#job-move-back').click(); f.q('[data-open-job]').click(); f.q('[data-open-sub="post"]').click();
+  f.q('[data-open-job]').click(); f.q('[data-open-sub="post"]').click();
   assert.deepEqual([...document.querySelectorAll('.job-actions button')].map((b) => b.textContent.trim()), ['Post to Slack', 'Skip']);
   assert.match(f.q('.job-write-hint').textContent, /nothing has been written to Slack yet/);
   const panel = f.q('#job-write-review');
@@ -2073,7 +1951,7 @@ test('the Writes checkpoint is in the footer only with writes, asks before relea
   assert.match(writes().getAttribute('aria-label'), /^Writes: You review\. Every write is made, decided, or has its own review setting$/);
 });
 
-test('a plate’s stub does what it names: Merge sends the merge pinned to its head, a suggested move opens that move', (t) => {
+test('a plate’s stub does what it names: Merge sends the merge pinned to its head, a failing one opens the sub-job to resolve', (t) => {
   const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
   job.subJobs = [{ ...sub('api'), stage: 'pr', pr: { url: 'https://github.com/org/repo/pull/4', head: 'h4', checkStatus: 'passing', checks: [] } }];
   f.view.update(f.data);
@@ -2082,13 +1960,13 @@ test('a plate’s stub does what it names: Merge sends the merge pinned to its h
   f.q('.job-plate-go').click();
   assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'approve-merge', head: 'h4' });
   assert.equal(f.q('#job-dialog').open, false, 'merging from the board opens nothing');
-  job.subJobs[0] = { ...job.subJobs[0], pr: { ...job.subJobs[0].pr, checkStatus: 'failing' }, error: 'Automatic repair limit reached', blocked: { move: 'fix-here' } };
+  job.subJobs[0] = { ...job.subJobs[0], pr: { ...job.subJobs[0].pr, checkStatus: 'failing' }, error: 'Automatic repair limit reached' };
   f.view.update(f.data);
   assert.ok(f.q('[data-board="job1"]').classList.contains('tone-bad'));
-  assert.equal(f.q('.job-plate-go').textContent, 'Fix here');
+  assert.equal(f.q('.job-plate-go').textContent, 'Resolve');
   f.q('.job-plate-go').click();
-  assert.ok(f.q('#job-move-form[data-move-form="fix-here"]'));
-  f.q('#job-move-back').click(); assert.equal(f.q('#job-dialog h2').textContent, 'Deliver api', 'Back lands on the sub-job');
+  assert.equal(f.q('#job-dialog h2').textContent, 'Deliver api', 'Resolve lands on the sub-job, where Request changes is');
+  assert.ok(f.q('.job-change').classList.contains('is-open'));
 });
 
 test('a plate’s stub decides a write draft in place: its verb approves it as drafted, Skip finishes it unwritten', (t) => {
@@ -2162,6 +2040,477 @@ test('New job has no Land on field: the plan chooses each PR\'s branch, so the j
   assert.equal('base' in f.sent[0].job, false);
 });
 
+test('a red PR\'s box is plain words: no Instant or Claude chips, and the idea goes to the repair session pinned to the head on screen', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
+  job.subJobs = [{ ...sub('api'), stage: 'pr', state: 'watching', pr: { url: 'https://github.com/org/repo/pull/7', head: 'h1', checkStatus: 'failing', checks: [] } }, { ...sub('web', ['api']), stage: 'implementation', state: 'queued' }];
+  f.view.update(f.data); f.q('.job-plate-graph [data-sub="api"]').dispatchEvent(f.event('click'));
+  assert.deepEqual([f.q('.job-quick'), f.q('[data-quick]'), f.q('[data-fill]')], [null, null, null], 'no chips');
+  const box = f.q('.job-change');
+  assert.deepEqual([box.querySelector('.job-change-to').textContent, box.querySelector('textarea').placeholder, box.querySelector('[data-change-send]').getAttribute('aria-label')], ['RRepair session', 'What should the repair do?', 'Send to repair session']);
+  assert.ok(box.querySelector('.job-change-attach input[type="file"]'), 'a picture can be picked as well as pasted or dropped');
+  const text = box.querySelector('textarea'); text.value = 'Accept the flaky e2e'; text.dispatchEvent(f.event('input'));
+  box.querySelector('[data-change-send]').click();
+  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'request-change', at: 'pr', ref: 'h1', text: 'Accept the flaky e2e' }, 'pinned to the head on screen');
+  f.q('.job-dialog-close').click();
+  f.q('.job-plate-graph [data-sub="web"]').dispatchEvent(f.event('click'));
+  assert.deepEqual([f.q('.job-quick'), f.q('.job-change-to').textContent], [null, 'PPlanner']);
+});
+
+test('a merged sub-job\'s idea goes to the planner, and the box stays while a plan change is pending since only the planner hears it', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
+  job.subJobs = [{ ...sub('api'), stage: 'deployment', state: 'watching', pr: { url: 'https://github.com/org/repo/pull/7', head: 'h1', mergeCommit: 'm1' }, deploymentResult: { status: 'failing', runs: [] } }, { ...sub('web'), stage: 'implementation', state: 'queued' }];
+  f.view.update(f.data); f.q('.job-plate-graph [data-sub="api"]').dispatchEvent(f.event('click'));
+  assert.deepEqual([f.q('.job-change').dataset.changeAt, f.q('.job-change-to').textContent, f.q('.job-quick')], ['step', 'PPlanner', null]);
+  job.replan = { feedback: 'x', at: 1, proposal: null }; f.view.update(f.data);
+  assert.equal(f.q('.job-quick'), null);
+  assert.equal(f.q('.job-change').dataset.changeAt, 'step');
+});
+
+test('a proposal with a diagnosis, ranked options and actions: options switch the graph, actions are marks on the node, approve names the option', (t) => {
+  const f = fixture(t); const [job] = f.data.jobs; job.stage = 'active';
+  const pr = { url: 'https://github.com/org/repo/pull/7', head: 'h1', checkStatus: 'failing' };
+  job.subJobs = [{ ...sub('api'), stage: 'pr', state: 'watching', pr }, { ...sub('web', ['api']), stage: 'implementation', state: 'queued' }];
+  job.plan = { ...plan, subJobs: [sub('api'), sub('web', ['api'])] };
+  const changes = (extra) => ({ frozen: [], kept: ['api', 'web'], edited: [], added: [], removed: [], ...extra });
+  const fixed = { ...job.plan, subJobs: [sub('flake'), { ...sub('api'), after: ['flake'] }, sub('web', ['api'])] };
+  job.replan = { feedback: 'Checks red', at: 1, previous: null, proposal: { id: 'run_p', label: 'Accept the red checks', why: 'Unrelated <i>flake</i>', plan: job.plan, merged: job.plan, changes: changes(),
+    actions: [{ type: 'accept-red', sub: 'api', pin: { at: 'head', ref: 'h1abcdef123' } }],
+    diagnosis: { summary: 'login-flow.spec <b>times out</b>', evidence: [{ label: 'run 88213', detail: 'e2e' }] },
+    alternatives: [{ label: 'Fix the flaky test first', why: 'A new PR first', plan: fixed, merged: fixed, changes: changes({ added: ['flake'], edited: [{ id: 'api', fields: ['after'] }], kept: ['web'] }), actions: [] }] } };
+  f.view.update(f.data); f.q('[data-board="job1"] .job-plate-open').click();
+  const html = () => f.q('#job-dialog').innerHTML;
+  assert.match(f.q('.job-triage').textContent, /Wrangler looked into it.*times out.*run 88213e2e/);
+  assert.ok(!html().includes('<b>times out</b>') && !html().includes('<i>flake</i>'), 'agent text is escaped');
+  assert.deepEqual([...document.querySelectorAll('.job-option b')].map((b) => b.textContent), ['Accept the red checksRecommended', 'Fix the flaky test first']);
+  assert.equal(f.q('.job-node[data-node="api"] .job-mark').textContent, 'Accept red', 'the action is drawn on the node it acts on');
+  assert.match(f.q('.job-replan-changes .job-mark-act').textContent, /Accept red: Deliver api\s*merge as it stands\s*pinned to head h1abcdef1/);
+  f.q('[data-action="approve-replan"]').click();
+  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: undefined, action: 'approve-replan', proposalId: 'run_p', option: 0 });
+  const second = f.q('input[name="opt"][value="1"]'); second.checked = true; second.dispatchEvent(f.event('change'));
+  assert.equal(f.q('.job-node[data-node="flake"] .job-mark').textContent, 'New');
+  assert.equal(f.q('.job-node[data-node="api"] .job-mark').textContent, 'Edited');
+  assert.equal(document.querySelectorAll('.job-replan-changes .job-mark-act').length, 0, 'the other option\'s action is not shown');
+  assert.ok(f.q('.job-option.sel').textContent.includes('Fix the flaky test first'));
+  f.q('[data-action="approve-replan"]').click();
+  assert.equal(f.sent.at(-1).option, 1);
+});
+
+test('a recover is a mark on the merged node that waits for its fix, and a proposal without options sends no option', (t) => {
+  const f = fixture(t); const [job] = f.data.jobs; job.stage = 'active';
+  job.subJobs = [{ ...sub('api'), stage: 'deployment', state: 'watching', pr: { url: 'https://github.com/org/repo/pull/7', head: 'h1', mergeCommit: 'm1' }, deploymentResult: { status: 'failing' } }];
+  job.plan = { ...plan, subJobs: [sub('api')] };
+  const merged = { ...job.plan, subJobs: [sub('api'), sub('fix')] };
+  job.replan = { feedback: 'Deploy failed', at: 1, previous: null, proposal: { id: 'run_q', plan: merged, merged, changes: { frozen: ['api'], kept: [], edited: [], added: ['fix'], removed: [] }, actions: [{ type: 'recover', sub: 'api', fix: 'fix', pin: { at: 'merge', ref: 'm1' } }] } };
+  f.view.update(f.data); f.q('[data-board="job1"] .job-plate-open').click();
+  assert.equal(f.q('.job-node[data-node="api"] .job-mark').textContent, 'Waits for its fix');
+  assert.match(f.q('.job-replan-changes .job-mark-act').textContent, /Recover: Deliver api\s*lands when “Deliver fix” deploys\s*pinned to merge m1/);
+  assert.equal(f.q('.job-options'), null, 'one option needs no chooser');
+  f.q('[data-action="approve-replan"]').click();
+  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: undefined, action: 'approve-replan', proposalId: 'run_q' });
+});
+
+// --- Show me and proof (design B step 1) ---
+
+const proofSub = (extra = {}) => ({ ...sub('api'), stage: 'review', state: 'verified', worktree: { path: '/wt', branch: 'sec-412' }, sessions: ['s1'], show: ['Lists sign-ins', 'SSO appears'],
+  ready: { round: 1, receiptId: 'run_1', checks: ['Lint clean', 'Lists sign-ins', 'SSO appears'], proof: [
+    { text: 'Lists sign-ins', shots: [{ file: 'l.png', mime: 'image/png', url: 'http://localhost:5174/audit', viewport: '1280x800', tool: 'Playwright', at: 1700000000000 }] },
+    { text: 'SSO appears', couldNot: 'No SSO key in this worktree' }] }, ...extra });
+const evidenceFrame = (file = 'l.png') => ({ event: 'job-evidence', jobId: 'job1', subJobId: 'api', round: 1, thumbs: [{ file, mime: 'image/jpeg', dataBase64: 'dGg=' }] });
+
+test('the plan editor lists each PR\'s Show me items, edits them like the title, and approval sends the cleaned list', (t) => {
+  const f = fixture(t);
+  f.data.jobs[0].plan = { ...plan, subJobs: [{ ...sub('api'), show: ['Lists sign-ins', 'Unit tests pass'] }, sub('web', ['api'])] };
+  f.view.update(f.data);
+  f.q('.job-plate-open[data-job="job1"]').click();
+  assert.equal(f.q('.job-node-show summary span').textContent, '2', 'the count on the node');
+  assert.deepEqual([...f.q('[data-show-d="api"]').querySelectorAll('input')].map((i) => i.value), ['Lists sign-ins', 'Unit tests pass']);
+  assert.equal(f.q('[data-show-d="web"] summary span').textContent, 'None');
+  const first = f.q('input[data-show="0"][data-show-k="0"]'); first.value = 'Filters by result'; first.dispatchEvent(f.event('input'));
+  f.q('[data-show-add="1"]').click();
+  assert.equal(f.q('[data-show-d="web"]').open, true, 'adding opens the editor and it survives the redraw');
+  assert.equal(document.activeElement, f.q('input[data-show="1"][data-show-k="0"]'), 'the new row takes focus');
+  const added = f.q('input[data-show="1"][data-show-k="0"]'); added.value = '  Web renders  '; added.dispatchEvent(f.event('input'));
+  f.q('[data-show-add="1"]').click(); f.q('[data-show-add="1"]').click();
+  f.q('[data-show-rm="0:1"]').click();
+  assert.deepEqual([...f.q('[data-show-d="api"]').querySelectorAll('input')].map((i) => i.value), ['Filters by result'], 'a redraw keeps what was typed');
+  assert.equal(f.q('input[data-show="0"]').value, 'Filters by result');
+  f.q('[data-action="approve-plan"]').click();
+  const [api, web] = f.sent[0].plan.subJobs;
+  assert.deepEqual(api.show, ['Filters by result']);
+  assert.deepEqual(web.show, ['Web renders'], 'trimmed, and the blank rows are gone');
+  assert.equal('show' in sub('x'), false);
+  assert.equal(f.data.jobs[0].plan.subJobs[1].show, undefined, 'the live plan is not touched until the server answers');
+});
+
+test('a sub-job with no Show me list sends none, and a session or write node has no editor', (t) => {
+  const f = fixture(t);
+  f.q('.job-plate-open[data-job="job1"]').click();
+  f.q('[data-action="approve-plan"]').click();
+  assert.equal(f.sent[0].plan.subJobs.every((s) => !('show' in s)), true);
+  const g = fixture(t);
+  g.data.jobs[0].plan = { ...plan, subJobs: [{ id: 'spike', kind: 'session', title: 'Spike', after: [], brief: 'Look' }] };
+  g.view.update(g.data); g.q('.job-plate-open[data-job="job1"]').click();
+  assert.equal(document.querySelectorAll('.job-node-show').length, 0);
+});
+
+test('the sub-job and the plan\'s reading section say what must be shown, escaped', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
+  job.subJobs = [proofSub({ show: ['Lists <b>sign-ins</b>', 'SSO appears'] })];
+  f.view.update(f.data);
+  f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  assert.deepEqual([...f.q('#job-dialog .job-show-list').querySelectorAll('li')].map((li) => li.textContent), ['Lists <b>sign-ins</b>', 'SSO appears']);
+  assert.equal(f.q('#job-dialog .job-show-list b'), null);
+});
+
+test('a ready receipt with proof is one checklist: the verdict, each Show me row with its evidence, the plain checks as rows, and no old list', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
+  job.subJobs = [proofSub()];
+  f.view.update(f.data);
+  f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  const dialog = f.q('#job-dialog');
+  assert.match(dialog.querySelector('.job-proof-verdict').textContent, /^2 of 3 checked· 1 couldn’t showRound 1$/);
+  assert.deepEqual([...dialog.querySelectorAll('.job-proof-item')].map((c) => [c.classList.contains('gap'), c.classList.contains('plain'), c.querySelector('.t').textContent.trim()]),
+    [[false, false, 'Lists sign-ins'], [true, false, 'SSO appears' + dialog.querySelector('.job-proof-item.gap .t small').textContent], [false, true, 'Lint clean']]);
+  assert.equal(dialog.querySelector('.job-proof-item.gap .job-proof-pill').textContent, 'couldn’t');
+  assert.equal([...dialog.querySelectorAll('h3')].some((h) => h.textContent === 'Ready for review'), false);
+  assert.equal(dialog.querySelector('.job-receipt'), null, 'no separate Also checked list');
+  assert.equal(dialog.querySelector('.job-pinned'), null, 'no round or tree hash beside Approve');
+  assert.equal(f.sent.at(-1).type, 'job-evidence', 'the dialog asks for the round\'s thumbnails');
+  assert.deepEqual(f.sent.at(-1), { type: 'job-evidence', id: 'job1', subJobId: 'api', round: 1 });
+  const asked = f.sent.length; f.view.update(f.data);
+  assert.equal(f.sent.filter((m) => m.type === 'job-evidence').length, 1, `a tick does not ask again (${asked})`);
+  f.view.evidence(evidenceFrame());
+  assert.equal(dialog.querySelector('[data-ev-file="l.png"] img').getAttribute('src'), 'data:image/jpeg;base64,dGg=', 'the thumbnail fills in place');
+  assert.match(f.q('#job-diff').textContent, /Review code in Wrangler/, 'the diff is still the other half of the review');
+});
+
+test('a receipt with no proof keeps the Ready for review list exactly as before', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
+  job.subJobs = [proofSub({ show: undefined, ready: { checks: ['Tests pass'], receiptId: 'run_1' } })];
+  f.view.update(f.data);
+  f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  assert.match(f.q('#job-dialog').textContent, /Ready for review/);
+  assert.equal(f.q('#job-dialog .job-proof'), null);
+  assert.equal(f.sent.some((m) => m.type === 'job-evidence'), false);
+});
+
+test('a delivered sub-job keeps what it verified: the checks as Verified, or its proof with no Ask', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'done';
+  job.subJobs = [proofSub({ show: undefined, stage: 'done', state: 'done', ready: { checks: ['Tests pass'], receiptId: 'run_1' } })];
+  f.view.update(f.data);
+  f.q('[data-filter="done"]').click();
+  f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  assert.ok([...f.q('#job-dialog').querySelectorAll('h3')].some((h) => h.textContent === 'Verified'));
+  assert.deepEqual([...f.q('#job-dialog .job-receipt').querySelectorAll('li')].map((li) => li.textContent.trim()), ['✓ Tests pass']);
+  job.subJobs = [proofSub({ stage: 'done', state: 'done' })];
+  f.view.update(f.data);
+  f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  assert.ok(f.q('#job-dialog .job-proof'), 'the checklist stays');
+  f.q('#job-dialog [data-proof="0"]').click();
+  assert.equal(f.q('#job-dialog [data-proof-ask]'), null, 'nothing is left to ask a delivered step');
+});
+
+test('a row opens in place, its shot opens the viewer: where it was taken, a reason in full, a way back, and Ask about this starts the box', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
+  job.subJobs = [proofSub()];
+  f.view.update(f.data);
+  f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  const dialog = f.q('#job-dialog');
+  const row = dialog.querySelector('.job-proof-item');
+  row.open = true; row.dispatchEvent(f.event('toggle'));
+  f.view.update(f.data);
+  assert.equal(dialog.querySelector('.job-proof-item').open, true, 'an opened row stays open across a tick');
+  assert.match(dialog.querySelector('.job-proof-item .job-proof-shot small').textContent, /localhost:5174\/audit · 1280x800/);
+  f.q('[data-proof="0"]').click();
+  assert.equal(dialog.querySelector('h2').textContent, 'Shown working · 1 of 2');
+  assert.match(dialog.querySelector('.job-proof-meta').textContent, /URLhttp:\/\/localhost:5174\/audit.*Viewport1280x800.*HowPlaywright/);
+  assert.deepEqual(f.sent.at(-1), { type: 'job-evidence', id: 'job1', subJobId: 'api', round: 1, file: 'l.png' }, 'the full file is asked for once it is open');
+  f.view.evidence({ event: 'job-evidence', jobId: 'job1', subJobId: 'api', round: 1, file: 'l.png', mime: 'image/png', dataBase64: 'ZnVsbA==' });
+  assert.equal(dialog.querySelector('img.job-proof-full').getAttribute('src'), 'data:image/png;base64,ZnVsbA==');
+  f.view.update(f.data);
+  assert.equal(dialog.querySelector('h2').textContent, 'Shown working · 1 of 2', 'a tick leaves the open shot where it was');
+  f.q('[data-proof-go="1"]').click();
+  assert.match(dialog.querySelector('.job-proof-stage.gap').textContent, /No SSO key in this worktree/);
+  assert.match(dialog.querySelector('[data-proof-ask]').textContent, /Ask it to try another way/);
+  f.q('[data-proof-back]').click();
+  assert.ok(dialog.querySelector('.job-proof-list'), 'back is the step');
+  f.q('[data-proof-ask="0"]').click();
+  const box = dialog.querySelector('.job-change textarea');
+  assert.equal(box.value, 'About “Lists sign-ins”: ', 'the question is started, about this picture');
+  assert.equal(dialog.querySelector('[data-change-send]').disabled, false);
+  assert.equal(dialog.querySelector('.job-proof-list') != null, true);
+  f.view.update(f.data);
+  assert.equal(dialog.querySelector('.job-change textarea').value, 'About “Lists sign-ins”: ', 'typed text survives the tick');
+  box.value = `${box.value}is the order right?`; box.dispatchEvent(f.event('input'));
+  dialog.querySelector('[data-change-send]').click();
+  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'request-change', at: 'code', ref: 'run_1', text: 'About “Lists sign-ins”: is the order right?' });
+});
+
+test('asking about a gap asks the agent to try another way', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
+  job.subJobs = [proofSub()];
+  f.view.update(f.data);
+  f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  f.q('[data-proof-ask="1"]').click();
+  assert.equal(f.q('#job-dialog .job-change textarea').value, 'You couldn’t show “SSO appears”. Please try another way: ');
+});
+
+test('the board plate says Ready to verify with a filmstrip, only for a sub-job that showed something', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
+  job.subJobs = [proofSub()];
+  f.view.update(f.data);
+  const plate = f.q('[data-board="job1"]');
+  assert.equal(plate.querySelector('.job-status').textContent, 'Ready to verify');
+  assert.match(plate.querySelector('.job-plate-detail').textContent, /1 of 2 shown · 1 couldn’t/);
+  assert.equal(plate.querySelectorAll('.job-plate-film .job-proof-thumb').length, 1);
+  assert.equal(f.sent.filter((m) => m.type === 'job-evidence').length, 1, 'the board asks for the thumbnails it draws');
+  f.view.evidence(evidenceFrame());
+  assert.equal(plate.querySelector('.job-plate-film img') !== null || f.q('[data-board="job1"] .job-plate-film img') !== null, true);
+  job.subJobs = [proofSub({ show: undefined, ready: { checks: ['Tests pass'], receiptId: 'run_1' } })];
+  f.view.update(f.data);
+  assert.equal(f.q('[data-board="job1"] .job-status').textContent, 'Review code');
+  assert.equal(f.q('[data-board="job1"] .job-plate-film'), null);
+});
+
+// --- Design B step 2: the session stays open after ready ---
+
+const parkedJob = (f, extra = {}, subExtra = {}) => {
+  const job = f.data.jobs[0]; job.stage = 'active';
+  job.runs = [{ id: 'run_1', subJobId: 'api', phase: 'implementation', stopped: false, parkedFor: 'ready', parkedAt: 1700000000000, mailedAt: null, sessionId: 's1', status: 'idle', ...extra }];
+  job.subJobs = [proofSub({ thread: [], ...subExtra })];
+  f.view.update(f.data);
+  return job;
+};
+
+test('a Code review step with its session parked and nothing said draws no empty thread, and the thread folds once there is one', (t) => {
+  const f = fixture(t); const job = parkedJob(f);
+  assert.deepEqual(jobStatus(job, job.subJobs[0]), { tone: 'needs', text: 'Ready to review' }, 'a paused session is not a running step');
+  assert.equal(jobNeedsReview(job, job.subJobs[0]), true);
+  f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  assert.equal(f.q('#job-dialog .job-thread'), null);
+  assert.equal(f.q('#job-dialog .job-history'), null);
+  job.subJobs[0].thread = [{ id: 'm1', at: 1, from: 'human', to: 'agent', text: 'Hi', round: 1 }]; f.view.update(f.data);
+  const fold = f.q('#job-dialog .job-history');
+  assert.equal(fold.open, false);
+  assert.match(fold.querySelector('summary').textContent, /Conversation 1 message/);
+  assert.match(fold.querySelector('.job-thread-head').textContent, /Its session is waiting on your review.*Open session/);
+  f.q('[data-fab-session="s1"]').click();
+  assert.deepEqual(f.sessions, ['s1']);
+});
+
+test('while the session works on a message the card says what it is doing and is not yours until it reports back', (t) => {
+  const f = fixture(t);
+  const job = parkedJob(f, { mailedAt: 1700000001000, status: 'working' }, { answering: { id: 'm1', kind: 'ask', round: 1 } });
+  assert.deepEqual(jobStatus(job, job.subJobs[0]), { tone: 'working', text: 'Answering you' });
+  assert.equal(jobNeedsReview(job, job.subJobs[0]), false);
+  job.subJobs[0].answering.kind = 'change'; f.view.update(f.data);
+  assert.deepEqual(jobStatus(job, job.subJobs[0]), { tone: 'working', text: 'Reworking · round 2' });
+  job.subJobs[0].answering.kind = 'retell'; f.view.update(f.data);
+  assert.equal(jobStatus(job, job.subJobs[0]).text, 'Rechecking the tree');
+  assert.equal(f.q('[data-board="job1"] .job-status').textContent, 'Rechecking the tree');
+});
+
+test('the thread shows both sides, the round markers and pictures, and escapes every word', (t) => {
+  const f = fixture(t);
+  const thread = [
+    { id: 'm1', at: 1700000000000, from: 'human', to: 'agent', text: 'What if <i>nobody</i> signed in?', round: 1, images: [{ file: 'ask-1.png' }] },
+    { id: 'm2', at: 1700000060000, from: 'agent', text: 'The empty state <b>shows</b>.', round: 1, shots: [{ file: 'm2-empty.png' }], run: { cmd: 'npm test', out: '1 passed <x>', exit: 0 } },
+    { id: 'm3', at: 1700000120000, from: 'system', text: 'Ready again with new proof.', round: 2 },
+  ];
+  parkedJob(f, {}, { thread });
+  f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  const msgs = [...f.q('#job-dialog').querySelectorAll('.job-msg')];
+  assert.deepEqual(msgs.map((m) => m.querySelector('.job-msg-who').textContent), ['You', 'Session', 'Round 2']);
+  assert.equal(f.q('#job-dialog .job-msg p i'), null); assert.equal(f.q('#job-dialog .job-msg p b'), null);
+  assert.equal(f.q('#job-dialog .job-msg-run x'), null);
+  assert.deepEqual([...f.q('#job-dialog').querySelectorAll('.job-msg [data-ev-file]')].map((e) => e.dataset.evFile), ['ask-1.png', 'm2-empty.png']);
+});
+
+test('with the session gone the thread stays as the record, and an approved round says which', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active'; job.runs = [];
+  job.subJobs = [proofSub({ state: 'approved', thread: [{ id: 'm1', at: 1, from: 'human', to: 'agent', text: 'Hi', round: 1 }] })];
+  f.view.update(f.data); f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  assert.match(f.q('#job-dialog .job-thread-head').textContent, /Session stopped.*Approved round 1/);
+  assert.equal(f.q('#job-dialog [data-fab-session]'), null);
+  job.subJobs = [proofSub({ thread: [] })]; f.view.update(f.data);
+  assert.equal(f.q('#job-dialog .job-thread'), null, 'no session and nothing said: nothing to draw');
+});
+
+test('approval names its round and tree only in its title, and earlier rounds stay one click away', (t) => {
+  const f = fixture(t);
+  parkedJob(f, {}, { ready: { ...proofSub().ready, round: 2, treeHash: 'a71d0e4ffff', receiptId: 'run_1#2' }, earlier: [{ round: 1, checks: ['Lint clean'], proof: [{ text: 'Lists sign-ins', shots: [{ file: 'l.png' }] }] }] });
+  f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  assert.equal(f.q('#job-dialog .job-pinned'), null);
+  assert.match(f.q('[data-action="approve-code"]').title, /Approval is tied to round 2 and working tree a71d0e4\./);
+  assert.equal(f.q('#job-dialog [data-change-ref]').dataset.changeRef, 'run_1#2');
+  assert.match(f.q('#job-dialog .job-history summary').textContent, /Earlier rounds Round 1/);
+  assert.equal(f.q('#job-dialog .job-earlier [data-ev-round="1"]').dataset.evFile, 'l.png');
+  f.q('[data-action="approve-code"]').click();
+  assert.equal(f.sent.at(-1).readyReceiptId, 'run_1#2');
+});
+
+test('a screenshot pasted into the Code review box is staged, held back from Send until it lands, and goes with the message', async (t) => {
+  const f = fixture(t); parkedJob(f);
+  let release; f.staging.stage = () => new Promise((r) => { release = () => r({ name: 'paste-1700000000000-bbbb2222.png' }); });
+  f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  const box = f.q('#job-dialog .job-change'), text = box.querySelector('textarea');
+  text.value = 'Make this a dropdown'; text.dispatchEvent(f.event('input'));
+  const e = f.event('paste'); e.clipboardData = { files: [new f.window.File(['x'], 'Screenshot.png', { type: 'image/png' })], items: [], types: ['Files'], getData: () => '' };
+  text.dispatchEvent(e);
+  assert.equal(e.defaultPrevented, true);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(box.querySelectorAll('.job-change-tray li').length, 1);
+  assert.equal(box.querySelector('[data-change-send]').disabled, true, 'not while it is still travelling');
+  release(); await new Promise((r) => setTimeout(r, 0));
+  assert.equal(box.querySelector('[data-change-send]').disabled, false);
+  box.querySelector('[data-change-send]').click();
+  const sent = f.sent.at(-1);
+  assert.deepEqual([sent.action, sent.at, sent.ref, sent.text, sent.images], ['request-change', 'code', 'run_1', 'Make this a dropdown', ['paste-1700000000000-bbbb2222.png']]);
+  assert.equal(f.q('#job-dialog .job-change-tray').hidden, true, 'the tray empties once sent');
+});
+
+test('every idea box takes pictures: one dropped on the job\'s box is staged and goes with the idea to the planner', async (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
+  job.subJobs = [{ ...sub('web'), stage: 'implementation', state: 'queued' }];
+  f.view.update(f.data); f.q('[data-board="job1"] .job-plate-open').click();
+  const box = f.q('#job-dialog .job-change'), text = box.querySelector('textarea');
+  assert.equal(box.dataset.changeAt, 'job'); assert.ok(box.querySelector('.job-change-tray'));
+  text.value = 'Match this layout'; text.dispatchEvent(f.event('input'));
+  const e = f.event('drop'); e.dataTransfer = { files: [new f.window.File(['x'], 'Mock.png', { type: 'image/png' })], items: [], types: ['Files'], getData: () => '' };
+  box.dispatchEvent(e);
+  assert.equal(e.defaultPrevented, true);
+  await new Promise((r) => setTimeout(r, 0)); await new Promise((r) => setTimeout(r, 0));
+  assert.equal(box.querySelectorAll('.job-change-tray li').length, 1);
+  assert.ok(box.classList.contains('has-img'), 'a picture opens the box');
+  box.querySelector('[data-change-send]').click();
+  assert.deepEqual([f.sent.at(-1).at, f.sent.at(-1).text, f.sent.at(-1).images], ['job', 'Match this layout', ['paste-1700000000000-aaaa1111.png']]);
+  assert.equal(f.q('#job-dialog .job-sent-imgs').querySelectorAll('img').length, 1, 'the picture rides up into the bubble');
+});
+
+test('the sent moment: the idea lifts into a bubble that says sending, ticks to sent when the server takes it, and a refusal puts the words back', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
+  job.subJobs = [{ ...sub('api'), stage: 'pr', state: 'watching', pr: { url: 'https://github.com/org/repo/pull/1', head: 'h1', checkStatus: 'failing', checks: [] } }];
+  f.view.update(f.data); f.q('.job-plate-graph [data-sub="api"]').dispatchEvent(f.event('click'));
+  const send = (words) => { const text = f.q('.job-change textarea'); text.value = words; text.dispatchEvent(f.event('input')); f.q('[data-change-send]').click(); };
+  send('Pin the client to v3');
+  const sent = () => f.q('#job-dialog .job-sent');
+  assert.deepEqual([sent().dataset.sentState, sent().querySelector('.job-sent-bubble').textContent], ['sending', 'Pin the client to v3']);
+  assert.match(sent().textContent, /Sending to repair session…/);
+  assert.equal(f.q('.job-change textarea').value, '', 'the box is empty again');
+  assert.equal(f.q('[data-change-send]').disabled, true);
+  assert.ok(sent().classList.contains('fresh'), 'it rises once');
+  f.view.update(f.data);
+  assert.equal(sent().classList.contains('fresh'), false, 'a live tick does not replay it');
+  f.view.created({ event: 'job-action-complete', jobId: 'job1', subJobId: 'api', action: 'request-change' });
+  assert.equal(f.q('#job-dialog').open, true, 'the dialog stays: the bubble is the confirmation');
+  assert.equal(sent().dataset.sentState, 'sent');
+  assert.match(sent().textContent, /Sent to repair session · .*Picks it up on this PR\./s);
+  assert.ok(sent().querySelector('.job-sent-tick'));
+  send('Also bump the lockfile');
+  assert.equal(f.view.changeFailed({ event: 'job-action-failed', jobId: 'job1', subJobId: 'api', action: 'request-change', error: 'This changed since you looked' }), true);
+  assert.equal(sent().dataset.sentState, 'failed');
+  assert.match(sent().textContent, /Not sent: This changed since you looked/);
+  assert.equal(f.q('.job-change textarea').value, 'Also bump the lockfile', 'nothing typed is lost');
+  f.view.openDetail('job1', 'api');
+  assert.equal(sent(), null, 'a fresh look starts clean');
+});
+
+// ---- Red steps (server/job-red.js): Fixing is Wrangler's, Declared red is yours ----
+const fixtureWithRed = (t) => fixture(t);
+const redRef = (job, s) => `${s.error || ''}|${s.pr?.head || ''}|${s.pr?.mergeCommit || ''}|${job.runs.filter((r) => r.subJobId === s.id).length}`;
+function redJob(f, over = {}) {
+  const [job] = f.data.jobs; job.stage = 'active'; job.plan = plan; job.revision = 3;
+  job.subJobs = [{ ...sub('api'), stage: 'pr', state: 'watching', error: 'Automatic repair limit reached. Review changes, then retry if needed.', pr: { url: 'https://github.com/org/repo/pull/412', head: 'h1', checkStatus: 'failing', checks: [{ name: 'e2e', state: 'FAILURE' }] } },
+    { ...sub('web', ['api']), stage: 'implementation', state: 'queued' }, { ...sub('docs'), stage: 'implementation', state: 'queued' }];
+  Object.assign(job, over);
+  return job;
+}
+const feedback = 'RED STEP: …';
+
+test('Fixing is Wrangler\'s: not counted in Needs you, a spinner on the card, and only the red step and what follows it are held', (t) => {
+  const f = fixtureWithRed(t);
+  const job = redJob(f, { replan: { feedback, at: 1, proposal: null, previous: null, red: { sub: 'api', auto: false, n: 1 } } });
+  f.view.update(f.data);
+  assert.deepEqual([jobState(job), jobLabel(job), subState(job, job.subJobs[0]), subLabel(job, job.subJobs[0])], ['running', 'Fixing', 'running', 'Fixing']);
+  assert.equal(jobNeedsReview(job, job.subJobs[0]), false, 'red, but handled: not yours');
+  assert.deepEqual(job.subJobs.map((s) => heldByReplan(job, s)), [false, true, false], 'web waits on api; docs carries on');
+  assert.deepEqual([...redScope(job, 'api')], ['api', 'web']);
+  f.q('.job-plate-open[data-job="job1"]').click();
+  assert.match(f.q('#job-dialog').textContent, /Fixing/);
+  f.view.openDetail('job1', 'api');
+  const dialog = f.q('#job-dialog');
+  assert.ok(dialog.querySelector('.job-event-fix.fixing .job-spin'), 'the failure stays; under it Wrangler\'s turn');
+  assert.match(dialog.querySelector('.job-event').textContent, /Checks failing on #412/);
+  assert.ok(dialog.querySelector('#job-retry') && !dialog.querySelector('#job-retry').classList.contains('primary'), 'Retry stays, quietly');
+  assert.equal(dialog.querySelector('.job-change'), null, 'the planner has it: the box is back once it does');
+  f.view.openDetail('job1', 'web');
+  assert.match(f.q('#job-dialog .job-chip-state').textContent, /Held for the fix/);
+  assert.match(f.q('#job-dialog .job-chip-state').title, /Held while Wrangler fixes a red step this one waits on/);
+});
+
+test('a fix waiting on you is Fix ready (Needs you); approving opens the proposal on the job', (t) => {
+  const f = fixtureWithRed(t);
+  const job = redJob(f, { replan: { feedback, at: 1, red: { sub: 'api', auto: false, n: 1 }, proposal: { id: 'run_p', label: null, diagnosis: { summary: 'The e2e times out on the SSO stub' }, plan: { ...plan }, merged: { ...plan }, changes: { frozen: [], kept: ['api'], edited: [], added: [], removed: [] }, actions: [{ type: 'rework', sub: 'api', note: 'Wait for the stub', pin: { at: 'head', ref: 'h1' } }], alternatives: [] } } });
+  f.view.update(f.data);
+  assert.deepEqual([subState(job, job.subJobs[0]), subLabel(job, job.subJobs[0]), jobNeedsReview(job, job.subJobs[0])], ['needs', 'Fix ready', true]);
+  assert.equal(jobCards([job]).filter((c) => !c.sub).length, 0, 'the red step is the card: not counted twice');
+  assert.match(plateAsk(job).label, /Fix ready/); assert.deepEqual([plateAsk(job).button, plateAsk(job).sub], ['Review fix', '']);
+  f.view.openDetail('job1', 'api');
+  const dialog = f.q('#job-dialog');
+  assert.match(dialog.querySelector('.job-event-fix.ready').textContent, /The e2e times out on the SSO stub.*Waiting because Red steps is “You decide”/);
+  const review = dialog.querySelector('[data-open-job].primary'); assert.equal(review.textContent, 'Review fix');
+  review.click();
+  assert.match(f.q('#job-dialog').textContent, /Red step.*Deliver api.*repair limit/s, 'the proposal says which step, not what a person typed');
+  assert.ok(f.q('#job-dialog [data-action="approve-replan"]'));
+});
+
+test('a declared red is the only red you act on: counted in Needs you, with what was tried and the decision, and Decide opens the options', (t) => {
+  const f = fixtureWithRed(t);
+  const job = redJob(f); const api = job.subJobs[0];
+  api.red = { attempts: [], declared: { at: 1, ref: redRef(job, api), summary: 'login-flow.spec is flaky on main and needs QA sign-off', tried: ['Replan 1: reran e2e twice', 'Replan 2: added a wait'], ask: 'Merge #412 with the red check, or hold it?', auto: false } };
+  f.view.update(f.data);
+  assert.deepEqual([subState(job, api), subLabel(job, api), subLine(job, api), jobNeedsReview(job, api), jobState(job)], ['failing', 'Declared red', '#412 · Declared red', true, 'failing']);
+  assert.deepEqual([plateAsk(job).label, plateAsk(job).button, plateAsk(job).sub], ['Declared red', 'Decide', 'api']);
+  assert.equal(changeHint('pr', job, api), 'Gets everything already tried, and proposes a fix for you to approve.');
+  f.view.openDetail('job1', 'api');
+  const dialog = f.q('#job-dialog');
+  const box = dialog.querySelector('.job-event-fix.declared');
+  assert.match(box.textContent, /Declared red.*QA sign-off/); assert.deepEqual([...box.querySelectorAll('li')].map((l) => l.textContent), ['Replan 1: reran e2e twice', 'Replan 2: added a wait']);
+  assert.match(box.querySelector('.ask').textContent, /Needs you: Merge #412 with the red check, or hold it\?/);
+  assert.ok(dialog.querySelector('.job-change'), 'your own words go to the planner with all of it');
+  // With options waiting, Decide opens them on the job.
+  job.replan = { feedback: 'Declared red', at: 1, red: { sub: 'api', auto: false }, proposal: { id: 'run_e', label: 'Accept red and merge', plan, merged: plan, changes: { frozen: [], kept: ['api'], edited: [], added: [], removed: [] }, actions: [{ type: 'accept-red', sub: 'api', pin: { at: 'head', ref: 'h1' } }],
+    alternatives: [], escalation: { sub: 'api', summary: 'x', tried: [], ask: 'Merge #412 with the red check, or hold it?' } } };
+  f.view.update(f.data); f.view.openDetail('job1', 'api');
+  assert.equal(f.q('#job-dialog [data-open-job].primary').textContent, 'Decide');
+  assert.equal(plateAsk(job).sub, '');
+  f.q('#job-dialog [data-open-job].primary').click();
+  assert.match(f.q('#job-dialog').textContent, /Declared red.*Deliver api.*Needs you.*Merge #412/s);
+});
+
+test('Red steps is the sixth checkpoint (You decide / Wrangler replans) and Replans per step is a setting', (t) => {
+  const f = fixtureWithRed(t);
+  f.q('#jobs-settings').click(); const form = f.q('#job-settings-form');
+  const row = form.querySelector('[data-checkpoint="reviewRed"]');
+  assert.equal(row.querySelector('.job-review-name').firstChild.textContent, 'Red steps');
+  assert.deepEqual([form.elements.reviewRed.checked, form.elements.reviewRed.getAttribute('aria-label')], [true, 'Red steps: You decide']);
+  form.elements.reviewRed.checked = false; row.dispatchEvent(f.event('change'));
+  assert.equal(form.elements.reviewRed.getAttribute('aria-label'), 'Red steps: Wrangler replans');
+  assert.match(row.querySelector('small').textContent, /^Wrangler replans a red step: it fixes the step, changes the plan \(if Plan is on Auto\), or declares it red for you/);
+  assert.equal(form.elements.maxReplans.value, '2'); form.elements.maxReplans.value = '3';
+  form.dispatchEvent(f.event('submit'));
+  const patch = f.sent.at(-1).patch;
+  assert.deepEqual([patch.maxReplans, patch.reviewDefaults.reviewRed], [3, false]);
+  const job = redJob(f); f.view.update(f.data);
+  f.q('.job-plate-open[data-job="job1"]').click();
+  const tile = f.q('.job-detail-footer [data-review="reviewRed"]');
+  assert.equal(tile.getAttribute('aria-label'), 'Red steps: You decide. Switch to Wrangler replans');
+  job.reviewRed = false; f.view.update(f.data);
+  assert.equal(f.q('.job-detail-footer [data-review="reviewRed"]').getAttribute('aria-label'), 'Red steps: Wrangler replans. Switch to You decide');
+  f.q('.job-detail-footer [data-review="reviewRed"]').click();
+  assert.deepEqual([f.sent.at(-1).action, f.sent.at(-1).field, f.sent.at(-1).you, f.sent.at(-1).release], ['set-review', 'reviewRed', true, undefined], 'nothing waits at this checkpoint, so it never asks first');
+});
+
 test('a refused cleanup on a dropped sub-job shows what would be lost, and Discard echoes back exactly the list it showed', (t) => {
   const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active'; job.cancelledAt = 1;
   const refusal = { path: '/wt/api', branch: 'job-api', base: 'main', head: 'cc47137aaaa', fingerprint: 'fp1',
@@ -2223,4 +2572,26 @@ test('plan review sets a PR\'s own base from its branch pill, and blank lands wh
   assert.equal(f.q('.job-node-base.own'), null);
   f.q('[data-action="approve-plan"]').click();
   assert.equal('base' in f.sent.at(-1).plan.subJobs[0], false, 'cleared, it is gone rather than empty');
+});
+
+test('what the agent left running is a chip among the step\'s own, its popover stays open across a tick, and Logs and Stop all act', (t) => {
+  const f = fixture(t);
+  const job = parkedJob(f, {}, { running: { items: [{ name: 'web', url: 'http://localhost:5174', pid: 4821, log: '/wt/web.log', up: true }, { name: 'api', url: 'http://localhost:8788', up: true }] } });
+  f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  const chip = f.q('#job-dialog .job-detail-meta .job-run-chip');
+  assert.equal(chip.textContent.trim(), '2 running');
+  assert.equal(f.q('#job-dialog .job-running'), null, 'no Running for you bar in the body');
+  const pop = f.q('#job-dialog .job-run-pop');
+  pop.open = true; pop.dispatchEvent(f.event('toggle'));
+  f.view.update(f.data);
+  assert.equal(f.q('#job-dialog .job-run-pop').open, true);
+  assert.deepEqual([...f.q('#job-dialog').querySelectorAll('.job-run-panel li a')].map((a) => a.textContent), ['localhost:5174 ↗', 'localhost:8788 ↗']);
+  f.q('[data-running-logs="web"]').click();
+  assert.deepEqual(f.sent.at(-1), { type: 'job-running-logs', id: 'job1', subJobId: 'api', name: 'web' });
+  f.view.runningLog({ subJobId: 'api', name: 'web', text: 'ready in 300ms' });
+  assert.match(f.q('#job-dialog .job-run-panel .job-run-logs pre').textContent, /ready in 300ms/);
+  f.q('[data-running-stop]').click();
+  assert.equal(f.sent.at(-1).action, 'stop-running');
+  job.subJobs[0].running.items[0].up = false; f.view.update(f.data);
+  assert.equal(f.q('#job-dialog .job-run-chip').textContent.trim(), '1 of 2 running');
 });

@@ -7,6 +7,7 @@ import { jobPrompt, placeholderBranch } from './job-prompts.js';
 import { removeWorktree, gitRepoRoot } from './git.js';
 import { targetOf } from './jobs-schema.js';
 import { checkoutsDir } from './data-dir.js';
+import { ensureInbox } from './job-evidence.js';
 
 // The one module that touches sessions — and therefore the one that had to be
 // REWRITTEN for the extension port rather than copied. In core (agent-wrangler
@@ -174,7 +175,11 @@ export class JobRuntime {
     // would make this explicit rather than positional.
     this.pendingLaunch = { prepared, cleanupHead, adopt: Boolean(existing) };
     const checkouts = planning && checkoutsDir();
-    const addDirs = [...new Set([...(checkouts ? [checkouts] : []), ...writableDirsFor(job)])];
+    // The proof inbox (job-evidence.js) lies outside the worktree, so the agent
+    // that fills it is granted it: a Codex step (never under Full access, which
+    // needs no grant) and a Claude one, whose --add-dir spares it a prompt per file.
+    const evidence = run.phase === 'implementation' && sub && !(job.agent === 'codex' && job.sandbox === 'full') ? ensureInbox(job.id, sub.id) : null;
+    const addDirs = [...new Set([...(checkouts ? [checkouts] : []), ...writableDirsFor(job), ...(evidence ? [evidence] : [])])];
     const images = this.imagesFor(job, run.phase);
     try {
       const result = await this.host.sessions.spawn({

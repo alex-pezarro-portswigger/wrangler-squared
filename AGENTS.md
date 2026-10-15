@@ -103,7 +103,81 @@ feature).
   decided and the runner mails it (`run.mailedAt`). Don't let a new liveness or
   idle rule reach a parked run. A stored write with no `by` predates this and is
   failed on load (`job-store.js migrateSessionWrites`), never run;
-  `validatePlan` looks past it so moves still work on that job.
+  `validatePlan` looks past it so a plan edit still works on that job.
+- **One action brings an idea in: `request-change {subJobId?, at, ref, text}`**
+  (`server/job-change.js`), from the Add idea box (`changeBoxHtml`, plain words
+  plus pictures, no chips) on every step, review and proposal; it replaced `revise-session`, both `replan` forms, `fix-here`
+  and the seven moves (Retry stays a button). `at`/`ref` pin it to what the
+  human read (`changeView`, mirrored client-side in `public/jobs.js`): a moved
+  head, receipt, revision or proposal refuses it. It routes to the step's
+  resumable agent (the tree's or result's session, an open PR's repair session)
+  else the planner, which proposes a plan change. The box is not a `<form>`, so
+  a tick's redraw is held back only while text is typed in it. Its pictures are
+  kept on every route (`handlers.js prepare`: the round's folder, else
+  `ideasDir`); outside a parked review they reach the agent as paths appended to
+  the idea's words. What was sent stays as a bubble (`askSent`) until the dialog
+  moves on, ticked by `job-action-complete`, refused back into the box.
+- **Red steps go up one level before the human** (`server/job-red.js`). A sub-job
+  with an `error` is sent to the planner by the runner's `triageRed` when
+  `settings.maxReplans` > 0 (0 = the old "red waits for you"), one replan at a
+  time, stamped `run.red` and counted per step; the replan carries `job.replan.red
+  = {sub, auto, n}` and holds only that step and its dependants (`heldBy`, mirrored
+  client-side as `heldByReplan`/`redScope`: use them, never `!job.replan`, for
+  per-sub gates). The sixth checkpoint `reviewRed` (true = "You decide", the
+  default) only chooses whether the proposal waits; Accept red, Mark and Recover
+  are never applied automatically. A red is DECLARED by `declareRed` (tries used up,
+  `escalate`, a planner that blocked or died, an empty proposal) and its
+  `declared.ref` is `redRef` (error, head, merge commit, run count): a new
+  failure, head or run un-declares it and a decision about the old one
+  (`red.held`) never carries over. `blocked`, `replan` and `escalate` are the
+  "go up one level" receipts. The board's states are `redFixing` (not counted in
+  Needs you), `redFixReady` and `redDeclared` in `public/jobs.js`.
+- **A proposal can carry actions and up to three ranked options**
+  (`server/job-actions.js`, applied by `approveReplan`): `accept-red`, `mark`
+  (merged/done, `evidence` required), `rework` and `recover {fix}` on a live
+  sub-job. The server stamps each with a pin (PR head, merge commit or stage) at
+  proposal time and `approve-replan` refuses if it moved; the planner never
+  writes a pin (the schema is strict). Options are the receipt's own plan first,
+  then `alternatives` (max 2), each merged and stamped when the receipt lands, so
+  one bad option refuses the whole receipt; approve takes `option`. An action is
+  drawn as a mark on its graph node (`actionMark`).
+- **A session parks after `ready`, so the human can ask it things** (`server/job-parked.js`).
+  With Code on You review the `ready` receipt does NOT set `run.report` (that ends a run):
+  it sets `run.readyReport`, `parkedFor: 'ready'`, `parkedAt` and clears `mailedAt`, like a
+  drafts park (no slot, `settle()` holds it only to its card existing) but never matched by
+  `draftsDecided`. The run waits on `waitsOnReview`; approve, a rework, drop or a retry end
+  it quietly and the publish run then claims the sub-job. `request-change` on `code` with a
+  parked run writes a `sub.thread` message (`askAgent`, `sentAt: null`) and the runner mails
+  it (`deliverThread`, `threadMail`), setting `mailedAt` (the run is working again). The
+  agent answers with `reply {text, shots?, run?}` (parks again; tree and round unchanged) or
+  a fresh `ready`: round n+1, `receiptId` `<run>#n`, the old round kept in `sub.earlier`.
+  Pasted images are copied into the round's folder and mailed as paths
+  (`TODO(host-api mail:images)`). `ready.treeHash` (`git.js workingTreeHash`: `add -A` into a
+  temp index, `write-tree`) is read by the tool handler at the receipt; `approve-code` is
+  refused unless the `job-action` handler's fresh read matches (`TREE_MOVED` also queues a
+  `retell` message). Code on Auto never parks.
+- **What the agent leaves running is the agent's; tearing it down is ours** (`server/job-running.js`).
+  `ready` (and a restarting `reply`) may carry `running: [{name, url?, pid?, stop?, log?}]`, the
+  agent's own detached (`setsid`) dev server, database, worker; the extension never starts one. It is kept
+  as `sub.running` (`items` with a probed `up`, `owed` for entries a later round dropped, `stopped` after a
+  teardown). The runner's `sweepRunning` runs FIRST each tick (so before cleanup removes the worktree a
+  `stop` command runs in, and at boot): it tears down `dueTeardown` (owed, plus everything once
+  `holdsRunning` is false: approve, drop, cancel, replan, cleanup, retry), probes the rest, and writes only
+  when up/down flips. Teardown kills the pid's group (just the pid if it does not lead one; never our own
+  process), runs each `stop` in the worktree, then checks the URLs stopped answering, and NEVER fails an
+  approval: a leftover is `stopped.still`, drawn amber. Code on Auto owes everything at once. Logs reads only
+  from under the worktree or the proof inbox (symlinks resolved). `restart-running` mails the parked session
+  via `askAgent` (`kind: 'restart'`); `stop-running` just owes. The bar and dot are `public/job-running.js`.
+- **A PR's `show` list is answered with proof, not claims** (`server/job-evidence.js`).
+  The implementer saves files into one inbox per sub-job (`$JOB_EVIDENCE`, given in
+  its prompt and granted as `addDirs`); the `ready` receipt names them per check
+  (`shots`, `run` or `couldNot`), `job-store.js _proofOf` refuses a receipt that
+  leaves a `show` item out and copies exactly the named files, sniffed by magic
+  bytes and capped at 5 MB, into `round-<n>`. `ready.checks` stays plain strings
+  (history and the old list read it); the proof lives beside it as `ready.proof`.
+  The board gets bytes only as `job-evidence` frames (thumbnails via `sips`), cached
+  in `public/job-proof.js`. A sub-job with `show` items reports `ready` even with
+  Code on Auto (`leavesUncommitted`), so the proof is kept.
 - **A Codex job's sandbox is the manifest's `codexPolicy` hook** (host API 1.12),
   next to `skillsFor` and gated the same way (`runForSession`). Its context
   carries the façade as `ext`, not `host`. A job with no `sandbox` field (one

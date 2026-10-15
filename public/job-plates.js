@@ -2,8 +2,10 @@ import { esc, tildify } from './util.js';
 import { ICONS } from './icons.js';
 import { SCENES, sceneArt, hash } from './model-plates.js';
 import { skyHtml } from './job-skylines.js';
-import { isPrSub, isSessionSub, isHumanSub, isWriteSub, isMakeWrite, writeAwaitingReview, writeReviewed, writeTarget, writeVerb, placesOf, PLACES, webUrl, edgesOf, kindClass, kindCountLabel, dependencyLevels, dependencyLine, dependencySatisfied, jobCostLabel, JOB_COST_TITLE, reviewFlagsLabel, prNumber, promptsWaiting, promptWhere, codeAwaitingReview, deploymentStalled, mergeApprovable, eventFor, movesFor, replanProposed } from './jobs.js';
+import { isPrSub, isSessionSub, isHumanSub, isWriteSub, isMakeWrite, writeAwaitingReview, writeReviewed, writeTarget, writeVerb, placesOf, PLACES, webUrl, edgesOf, kindClass, kindCountLabel, dependencyLevels, dependencyLine, dependencySatisfied, jobCostLabel, JOB_COST_TITLE, reviewFlagsLabel, prNumber, promptsWaiting, promptWhere, codeAwaitingReview, deploymentStalled, mergeApprovable, replanProposed, redDeclared, redFixReady } from './jobs.js';
 import { STATES, stateIconHtml, stateSolid, subState, subLabel, subLine, jobState, jobLabel, leadSub } from './job-state.js';
+import { hasProof, proofSummary, summaryText, filmHtml } from './job-proof.js';
+import { runningDotHtml } from './job-running.js';
 
 // The board as a wall of night skies: each job's plan is drawn into a quiet sky
 // over its own Gargantua sky (job-skylines.js), lit in the colour of the job's state,
@@ -193,10 +195,12 @@ export function plateAsk(job) {
   const detail = `${n ? `#${n} · ` : ''}${lead.title}${peers > 0 ? ` +${peers}` : ''}`;
   const ask = (label, button, icon, act = 'open') => ({ tone, label, detail, button, icon, act, sub: lead.id });
   if (state === 'failing') {
-    const id = eventFor(job, lead)?.suggested, move = id && movesFor(job, lead).find((m) => m.id === id);
-    const label = subLine(job, lead).replace(/^#\d+ · /, '');
-    return move ? ask(label, move.label, ICONS.x, `move:${move.id}`) : ask(label, 'Resolve', ICONS.x);
+    // The only red you act on: Wrangler gave up and says why. With options it
+    // opens the proposal on the job; without, the sub-job holds what it found.
+    if (redDeclared(job, lead) && !job.error) { const a = ask('Declared red', 'Decide', ICONS.x); return job.replan?.proposal ? { ...a, sub: '' } : a; }
+    return ask(subLine(job, lead).replace(/^#\d+ · /, ''), 'Resolve', ICONS.x);
   }
+  if (redFixReady(job, lead)) return { ...ask('Fix ready', 'Review fix', ICONS.eye), sub: '' };
   // A draft (or a published output) waiting on you is decided from the plate
   // as it stands; the dialog is where it is edited first.
   if (writeAwaitingReview(lead)) {
@@ -204,6 +208,9 @@ export function plateAsk(job) {
     return { tone, label: made ? 'Check output' : 'Draft ready', detail: '', button: writeVerb(lead), icon: ICONS.eye, act: 'approve-write', sub: lead.id, alt: made ? null : { label: 'Skip', act: 'skip-write' } };
   }
   if (mergeApprovable(job, lead)) return { ...ask(`Merge${n ? ` #${n}` : ''}`, 'Merge', ICONS.merge, 'merge'), detail: `Checks green · ${detail}` };
+  // Proof turns Review code into Ready to verify: what was shown, and a filmstrip
+  // of the first shots above the stub (plateHtml) so the board says whether it looks right.
+  if (codeAwaitingReview(lead) && hasProof(lead)) return { ...ask('Ready to verify', 'Verify', ICONS.eye), detail: `${detail} · ${summaryText(proofSummary(lead))}`, film: lead };
   if (codeAwaitingReview(lead)) return ask('Review code', 'Review', ICONS.code);
   if (isSessionSub(lead)) return ask(subLabel(job, lead), 'Review', ICONS.doc);
   if (isHumanSub(lead)) return ask(subLabel(job, lead), 'Open task', ICONS.hand);
@@ -225,14 +232,14 @@ export function plateHtml(job, scene, art = 'quiet') {
   const empty = job.stage === 'planning' && !job.plan && !job.cancelledAt ? 'Planning' : 'Not planned yet';
   const tip = [subs.length ? kindCountLabel(subs) : '', reviewFlagsLabel(job)].filter(Boolean).join(' · ');
   const foot = ask
-    ? `<div class="job-plate-stub"><span class="job-plate-ask">${ask.icon}<span class="job-status">${esc(ask.label)}</span></span><span class="job-plate-detail">${esc(ask.detail)}</span>${ask.alt ? `<button type="button" class="job-plate-alt" data-ask="${esc(ask.alt.act)}" data-job="${esc(job.id)}" data-sub="${esc(ask.sub)}">${esc(ask.alt.label)}</button>` : ''}<button type="button" class="job-plate-go" data-ask="${esc(ask.act)}" data-job="${esc(job.id)}" data-sub="${esc(ask.sub)}"${ask.session ? ` data-session="${esc(ask.session)}"` : ''}>${esc(ask.button)}</button></div>`
+    ? `${ask.film ? filmHtml(job, ask.film) : ''}<div class="job-plate-stub"><span class="job-plate-ask">${ask.icon}<span class="job-status">${esc(ask.label)}</span></span><span class="job-plate-detail">${esc(ask.detail)}</span>${ask.alt ? `<button type="button" class="job-plate-alt" data-ask="${esc(ask.alt.act)}" data-job="${esc(job.id)}" data-sub="${esc(ask.sub)}">${esc(ask.alt.label)}</button>` : ''}<button type="button" class="job-plate-go" data-ask="${esc(ask.act)}" data-job="${esc(job.id)}" data-sub="${esc(ask.sub)}"${ask.session ? ` data-session="${esc(ask.session)}"` : ''}>${esc(ask.button)}</button></div>`
     : `<div class="job-plate-foot"><span class="job-plate-glyph">${stateIconHtml(state)}</span><span class="job-status">${esc(jobLabel(job))}</span>${when ? `<span class="job-plate-when">${esc(when)}</span>` : ''}</div>`;
   const repo = repoLine(job), graph = work.length ? skyGraphHtml(job, scene, lvl, full) : null;
   const dim = !stateSolid(state);
   return `<article class="job-plate tone-${ask ? ask.tone : STATES[state].tone} ${state} ${ask ? 'stubbed' : ''}" data-board="${esc(job.id)}" data-scene="${scene}">
     <div class="job-plate-art ${full && (scene === 'haiku' || scene === 'fable') ? 'ink-dark' : ''}">${full ? `<svg class="scene" viewBox="0 0 320 200" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${sceneArt(scene, job.id, lvl)}</svg><div class="scrim"></div>` : skyHtml(job.id, tone, lvl, graph ? graph.floor : 82, dim)}
       ${repo ? `<div class="job-plate-tag ${ink(160, 14)}">${esc(repo)}</div>` : ''}${graph ? graph.svg : `<div class="job-plate-unplanned ${ink(160, 75)}">${empty}</div>`}</div>
-    <div class="job-plate-body"><div class="job-plate-where"><span>${job.createdAt ? `${ago(job.createdAt)} ago` : ''}</span>${cost ? `<span class="job-plate-cost" title="${esc(JOB_COST_TITLE)}${job.usdEstimated ? ' · includes an estimate for Codex sessions' : ''}">${esc(cost)}</span>` : ''}</div>
+    <div class="job-plate-body"><div class="job-plate-where"><span>${job.createdAt ? `${ago(job.createdAt)} ago` : ''}</span>${runningDotHtml(job)}${cost ? `<span class="job-plate-cost" title="${esc(JOB_COST_TITLE)}${job.usdEstimated ? ' · includes an estimate for Codex sessions' : ''}">${esc(cost)}</span>` : ''}</div>
       <button type="button" class="job-plate-open" data-job="${esc(job.id)}" data-sub="" title="${esc(tip)}">${esc(job.title)}</button>${placesHtml(job)}</div>
     ${foot}</article>`;
 }

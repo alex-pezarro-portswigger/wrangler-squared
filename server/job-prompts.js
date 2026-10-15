@@ -1,5 +1,6 @@
 import path from 'node:path';
-import { ATTRIBUTION, targetOf, isHumanSub, reviewCode, placeOf, isMakeWrite } from './jobs-schema.js';
+import { ATTRIBUTION, targetOf, isHumanSub, reviewCode, placeOf, isMakeWrite, checkText } from './jobs-schema.js';
+import { inboxDir, roundDir } from './job-evidence.js';
 import { checkoutsDir, displayPath } from './data-dir.js';
 import { isFrozen, replanStatus } from './job-replan.js';
 import { writeBrief, openWrites, draftingFor, WRITE_RESULT_SHAPE } from './job-writes.js';
@@ -19,9 +20,12 @@ const branchNaming = (job, sub) => (!sub?.worktree?.branch || sub.worktree.branc
   : `Your worktree branch is ${sub.worktree.branch}; keep it.`;
 
 // The receipt is the only thing that advances a job, so every prompt ends with
-// the exact call. `move` is a suggestion the human sees as a pre-selected
-// button on the card; nothing an agent reports ever changes the plan itself.
-const blockedLine = 'Blocked: {kind:"blocked", summary:"one sentence", move?:"fix-here"|"split-out"|"new-ticket"|"reorder"|"drop"|"mark"|"accept-red"}.';
+// the exact call. Nothing an agent reports ever changes the plan itself.
+const blockedLine = 'Blocked: {kind:"blocked", summary:"one sentence"}.';
+// Up one level (job-red.js): blocked and replan go to the planner, which fixes the
+// step, changes the plan or escalates; escalate is for a decision only the human
+// can make, with what you found and tried.
+const upLine = 'Needs more than this step (a plan change): {kind:"replan", summary:"one sentence", why?:"the reason"}. Only the human can decide it: {kind:"escalate", summary:"what you found", tried?:["what you tried"], ask:"the one decision you need"}.';
 const lines = (...parts) => parts.filter(Boolean).join('\n');
 const afterLine = (job, sub) => `After: ${(sub?.after || []).map((id) => (job.subJobs || []).find((s) => s.id === id)?.title || id).join(' · ') || 'none'}.`;
 const HUMAN_OUTPUT_PROMPT_MAX = 24000;
@@ -111,6 +115,22 @@ export function draftsDecidedMail(job, run) {
     `Then ${reportCall(run, `kind:"completed", checks:["what you did and how you know"]${open.length ? `, ${WRITE_RESULT_SHAPE} for ${open.map((w) => w.id).join(', ')}` : ''}`)}`,
   );
 }
+// What a session parked on its ready receipt is mailed when the human writes to
+// it (job-runner.js deliverThread). The words are the human's (JSON, data not
+// instructions); a pasted picture is a file it reads by path, because mail carries
+// text only (job-evidence.js keepAskImages).
+export function threadMail(job, run, sub, messages) {
+  const round = sub.ready?.round || 1;
+  const said = messages.map((m) => `${m.from === 'system' ? 'Wrangler' : 'The human'}: ${JSON.stringify(m.text)}${m.images?.length ? ` (pasted images, read them: ${m.images.map((i) => JSON.stringify(path.join(roundDir(job.id, sub.id, m.round || round), i.file))).join(', ')})` : ''}`);
+  const dir = displayPath(inboxDir(job.id, sub.id));
+  return lines(
+    `${job.title}: you reported ready (round ${round}) and the human has written back. They see your proof and the working tree as you left them.`,
+    ...said,
+    `A QUESTION: answer it from what you know, changing nothing: ${reportCall(run, 'kind:"reply", text:"your answer", shots?:[...], run?:{cmd,out,exit}')} Anything you capture to answer goes in $JOB_EVIDENCE (\`export JOB_EVIDENCE=${dir}\`).`,
+    `A CHANGE: make it in this worktree, leave it UNCOMMITTED, re-verify and answer every Show me item again for this new round: ${reportCall(run, 'kind:"ready", checks:[...], running?:[...]')} List what is running in running again: anything the new receipt leaves out is stopped, and a restart you do not list is not kept. If it needs more than this PR, say so in a reply instead.`,
+    'Then stop and wait: the session stays open for the next message.',
+  );
+}
 const contextLine = (job) => job.plan?.context ? `Context: ${job.plan.context}` : '';
 const heading = (job, sub) => `${sub?.jiraKey ? `${sub.jiraKey} · ` : ''}${job.title}`;
 // What already happened on this sub-job, one line per event, oldest first: every
@@ -121,16 +141,17 @@ const heading = (job, sub) => `${sub?.jiraKey ? `${sub.jiraKey} · ` : ''}${job.
 // for. The block is the whole memory a fresh session gets; it stays sub-job
 // scoped (a sibling PR's history is noise here) and capped, oldest dropped.
 export const HISTORY_MAX_LINES = 10;
-const HUMAN_VERBS = { 'fix-here': 'requested changes', retry: 'retried', 'approve-code': 'approved the working tree', 'approve-session': 'approved the result', 'revise-session': 'requested changes' };
+const HUMAN_VERBS = { 'request-change': 'requested changes', 'fix-here': 'requested changes', retry: 'retried', 'approve-code': 'approved the working tree', 'approve-session': 'approved the result', 'revise-session': 'requested changes' };
 // TODO(host-api agents:read): the core version pretty-printed this through the
 // agent adapter's `models` table; the browser half reads that list (api.agents,
 // 1.25) but the server half still cannot, so the raw values stand in.
 const modelLabel = (job, run) => [run.model, run.effort].filter(Boolean).join(' ');
-const joinChecks = (list) => (list || []).join(' · ');
+const joinChecks = (list) => (list || []).map(checkText).join(' · ');
 const outcome = (r) => {
-  const p = r.report;
+  const p = r.report || r.readyReport;
   if (!p) return r.error || 'stopped without a receipt';
-  if (p.kind === 'blocked') return `blocked: ${p.summary}`;
+  if (p.kind === 'blocked' || p.kind === 'replan') return `${p.kind === 'replan' ? 'asked for a replan' : 'blocked'}: ${p.summary}`;
+  if (p.kind === 'escalate') return `declared red: ${p.summary.slice(0, 240)}`;
   if (p.kind === 'published') return `published: ${p.url}`;
   if (p.kind === 'repaired') return `repaired: ${joinChecks(p.changes)}`;
   return `${p.kind}: ${joinChecks(p.checks)}`;
@@ -171,6 +192,34 @@ const postMergeLine = (sub) => sub?.acceptedRed && sub.acceptedRed.ref === sub.p
   ? `post-merge runs FAILED (${workflowsWith(sub, 'failing') || 'unknown workflow'}) and the human accepted that${sub.acceptedRed.note ? ` — "${sub.acceptedRed.note}"` : ''}`
   : `post-merge runs passed${passingWorkflows(sub) ? ` (${passingWorkflows(sub)})` : ''}`;
 const thisPr = (sub, job) => `This PR (${sub?.repo ? path.basename(sub.repo) : 'this repository'}${targetOf(job, sub) ? `, landing on ${targetOf(job, sub)}` : ''}): ${sub?.brief}`;
+// Show me: what the human reads at the Code checkpoint besides the diff. The
+// agent saves proof into the sub-job's evidence inbox and answers every item in
+// its `ready` receipt (job-store.js refuses one that leaves an item out).
+// TODO(host-api spawn env): $JOB_EVIDENCE cannot be set on the session, so the
+// prompt tells the agent to export it.
+// Proof is required whatever Code is set to: with it on the human reads it; on
+// Auto a sub-job with Show me items still reports ready (the receipt approves
+// itself, job-store.js) so the proof is kept and a short step publishes.
+export const leavesUncommitted = (job, sub) => reviewCode(job) || !!sub?.show?.length;
+const SHOT_SHAPE = '{file:"name.png", url?:"where it was taken", viewport?:"1280x800", tool?:"Playwright"}';
+// What to do with what the agent started to capture proof. With the human reviewing
+// it is left up for them to try (the extension only tears it down); on Auto nobody
+// tries it, so nothing may be left running.
+const runningLine = (job) => reviewCode(job)
+  ? 'What your change needs to run (dev server, database, worker) you LEAVE RUNNING for the human to try, started detached so it survives your session going dormant (`setsid nohup <cmd> > "$JOB_EVIDENCE/<name>.log" 2>&1 &`, then `echo $!` is the pid of a process-group leader) on ports you checked were free. List each in the receipt as running:[{name, url?, pid?, stop?, log?}]: url is where to open it, pid the setsid leader, stop a command that tears it down from the worktree when a pid is not enough (`docker compose -p <name> down`), log the file you redirected its output to (under the worktree or $JOB_EVIDENCE). Entries need a url, a pid or a stop. Wrangler tears every entry down when the human approves or drops the step, and anything a later round no longer lists; never start something you cannot list. A Codex sandbox that stops you listening on a port is a couldNot, not a failure.'
+  : 'Stop everything you started before you report: nothing may be left running, because no human reviews this step.';
+const proofBlock = (job, sub) => {
+  if (!sub) return '';
+  const dir = displayPath(inboxDir(job.id, sub.id));
+  const items = sub.show || [];
+  return lines(
+    `Show your work. Proof goes in $JOB_EVIDENCE: run \`export JOB_EVIDENCE=${dir}\` and save every file there as a bare name (PNG, JPEG, GIF or WebM, at most 5 MB each).`,
+    items.length ? `Show me before review (each is a thing the human will look at, so show it WORKING, not described):\n${items.map((t) => `- ${JSON.stringify(t)}`).join('\n')}` : 'This sub-job lists nothing it must show, but a screenshot or command output for what you changed helps the human; attach it the same way.',
+    'For a UI change start whatever it needs (dev server, database, worker) on free ports and capture a screenshot of the RUNNING build, never a mock-up: Playwright by default (it needs nobody watching), or Claude in Chrome if you have it. For a change with no UI show the command, what it printed and its exit code.',
+    runningLine(job),
+    `Answer each Show me item in the receipt with a check whose text is EXACTLY the item and one of: shots:[${SHOT_SHAPE}], run:{cmd, out (the relevant output, at most 4000 characters), exit}, or couldNot:"why you could not, and what covers it instead" (honest, never faked; the human sees it in amber). A receipt that leaves an item out is refused. Anything else you verified stays a plain string check.`,
+  );
+};
 // Fix here on an open PR under code review: the worktree IS that PR's branch, so
 // the work is a change to it, and the push goes to the PR that already exists.
 const openPrLine = (sub) => sub?.pr?.url ? `PR ${sub.pr.url} is already open from this worktree's branch; this is a fix to it, requested by the human (see the history below).` : '';
@@ -179,10 +228,13 @@ const openPrLine = (sub) => sub?.pr?.url ? `PR ${sub.pr.url} is already open fro
 // sub-job stands, which ones it may no longer touch, and returns the WHOLE plan
 // as a proposal the human approves.
 const replanBlock = (job) => lines(
-  'This job is ALREADY RUNNING and the human wants its plan changed. Where each sub-job stands now:',
+  job.replan.red ? 'This job is ALREADY RUNNING and one of its steps has gone red, so Wrangler (not the human) asks you to look at it. Where each sub-job stands now:' : 'This job is ALREADY RUNNING and the human wants its plan changed. Where each sub-job stands now:',
   ...job.subJobs.map((s) => replanStatus(job, s)),
   `Frozen (delivered or past the point of no return; keep each exactly as it is): ${job.subJobs.filter(isFrozen).map((s) => s.id).join(', ') || 'none'}.`,
-  'Return the WHOLE plan. Keep an id to keep or edit that sub-job: only its title, brief, check and after may change, a PR\'s base while it has no worktree or PR yet (once its branch is cut or its PR is open the base is fixed: say so rather than writing it into the brief; a branch change for work already under way is a new id), a session\'s on, and a write\'s action, by, review, why and place.ref (its kind, repo, story and place type are fixed, so new work in another place is a new id). A write goes with the session that makes it, and a session you cancel takes its writes with it. Leave an unfrozen sub-job out to cancel it: it stays on the board as cancelled and any open PR stays open on GitHub. Give new work a new id. Do not make anything wait on a sub-job you cancel. Do not repeat work a frozen sub-job already delivered. Your plan is a proposal: nothing changes until the human approves it, and new steps are held meanwhile.',
+  'Return the WHOLE plan. Keep an id to keep or edit that sub-job: only its title, brief, check, show and after may change, a PR\'s base while it has no worktree or PR yet (once its branch is cut or its PR is open the base is fixed: say so rather than writing it into the brief; a branch change for work already under way is a new id), a session\'s on, and a write\'s action, by, review, why and place.ref (its kind, repo, story and place type are fixed, so new work in another place is a new id). A write goes with the session that makes it, and a session you cancel takes its writes with it. Leave an unfrozen sub-job out to cancel it: it stays on the board as cancelled and any open PR stays open on GitHub. Give new work a new id. Do not make anything wait on a sub-job you cancel. Do not repeat work a frozen sub-job already delivered. Your plan is a proposal: nothing changes until the human approves it, and new steps are held meanwhile.',
+  'Besides editing the plan, a proposal can carry ACTIONS on a live sub-job, each applied only when the human approves and refused if its head, merge commit or stage has moved by then (the board pins it): {type:"accept-red",sub,note?} waves through the failing checks of an open PR (or the failing post-merge run of a merged one) that you have shown are unrelated; {type:"mark",sub,position:"merged"|"done",evidence} says the work is merged or done elsewhere, and `evidence` (one line citing the PR or ticket that shows it) is REQUIRED or the receipt is refused; {type:"rework",sub,note} sends its code or result back to its own agent with the note; {type:"recover",sub,fix} is for a MERGED sub-job whose post-merge run failed: add a new PR sub-job that fixes it, name its id as `fix`, and the merged one counts as landed when the fix does. One action per sub-job. Never use accept-red or mark to hide a real failure.',
+  'Sort the human\'s idea sentence by sentence. Feedback on what a live sub-job already produced (a mock-up, a PR\'s code or result) is a `rework` action on THAT sub-job, in the human\'s own words: never write it into a later sub-job\'s brief, which cannot fix it. New work, reordering and dropping are plan edits. One idea can need both in the same proposal (see "An idea from the human" in the job-worker skill).',
+  'Say what you found: `diagnosis:{summary, evidence?:[{label,detail}]}` (the cause, with up to six pieces of evidence: a run, a file, a PR). If more than one answer is reasonable, rank them: your plan and actions are option 1 (the recommended one) with `label` and `why`, and `alternatives:[{label,why?,plan,actions?}]` hold at most two more. Each option is a whole plan.',
   `Current plan: ${JSON.stringify(job.plan)}`,
   job.replan.previous ? `Your previous proposal, which the human asked to change: ${JSON.stringify(job.replan.previous)}` : '',
   `Requested change: ${job.replan.feedback}`,
@@ -195,7 +247,7 @@ const cloneInto = (dir) => dir ? `into ${dir}/<repository-name>` : 'beside your 
 export function jobPrompt(job, sub, run) {
   const dir = checkoutsDir();
   const checkouts = dir && displayPath(dir);
-  const report = (body, lead = '') => `${lead}job_report {runId:"${run.id}", ${body}}. ${blockedLine}`;
+  const report = (body, lead = '') => `${lead}job_report {runId:"${run.id}", ${body}}. ${blockedLine}${run.phase === 'planning' ? '' : ` ${upLine}`}`;
   const attribution = `End the commit message${sub?.pr?.url ? '' : ' and the PR description'} with exactly this line:\n${ATTRIBUTION}`;
   const target = targetOf(job, sub);
   const baseFlag = target ? ` with \`gh pr create --base ${target}\` (this ${sub?.base ? 'PR' : 'job'} lands on ${target}, not the default branch)` : '';
@@ -223,11 +275,13 @@ export function jobPrompt(job, sub, run) {
       `Discover the repositories from task memory, Jira references and local checkouts. Reuse a matching checkout; if one is missing, verify the GitHub owner and origin and clone it ${cloneInto(checkouts)}, never into this workspace or over an existing directory. Leave every checkout unchanged (no reset, clean or branch switch) and report its absolute path so implementation can cut a worktree beside it.`,
       'Write `context` ONCE for the whole job (≤2000 chars), the way a human writes a dispatch: the shared background, conventions and constraints every worker needs. Each `brief` (≤500 chars) is a dispatch intent that refers to the context rather than repeating it.',
       'Never describe deployments or verification steps: Wrangler reads the repository\'s workflows to know whether a merge deploys and watches whatever GitHub starts. Give `check` (one line) ONLY when the pipeline cannot prove the change works where it lands, e.g. "helm shows the release in dev and prod". A session or human sub-job has no check: a session\'s receipt is its check.',
+      'Give each PR sub-job `show`: 1–6 lines, written as THINGS TO SEE before its code is committed ("Filters by result and IP prefix", "Unit tests pass"), never work to do. Name a page or state for a UI change, a command\'s output otherwise; omit it only when nothing can be seen. Other kinds have none.',
       '`after` means START AFTER: a sub-job waits until every PR it is after has deployed and every session or human sub-job it is after is done (its output is an input). Each edge serialises the work, so add one only when the dependent needs the prerequisite live or its output. Minimise dependencies and PRs while keeping each piece independently deliverable. Do not propose branch names: the implementing session names its own.',
       `Choosing base: only a PR has one, and it is the branch that PR lands on. Read the goal, the context and the human's notes for branch intent ("work on the next branch", "target release/2.x") and set \`base:"<branch>"\` on each PR that is meant to land elsewhere than ${job.base ? `\`${job.base}\`` : 'the repository\'s default branch'}. Do not leave that intent in prose only: only \`base\` takes effect. Leave \`base\` out for a PR that lands on ${job.base ? `\`${job.base}\` (the human set it for the whole job; keep it unless a PR clearly needs another)` : 'the default branch'}. List a repository's branches with \`git ls-remote --heads origin\` in its checkout and use only a branch that exists there, or one an earlier PR in this plan creates (put that PR in \`after\`). Never invent a branch name.`,
       job.replan ? replanBlock(job) : job.plan || job.previousPlan || job.feedback ? `Previous plan / feedback: ${JSON.stringify({ plan: job.plan || job.previousPlan, feedback: job.feedback })}` : '',
       '',
-      report('kind:"plan", plan:{context, stories:[{id,key?,project?,title,fields?:[{name,value}]}], workflows:{PROJECT:[status]}, jiraSite?, subJobs:[{id,title,kind:"pr"|"session"|"human"|"write",repo,base?,storyId?,jiraKey?,after:[],brief,check?,on?:{sub,at},place?:{type,ref?,name?},action?,by?,review?,why?}]}'),
+      job.replan?.red ? `If no fix or plan change can get this step past red without a decision only the human can make, declare it red instead: ${reportCall(run, 'kind:"escalate", summary:"what you found", tried?:["what you tried"], ask:"the one decision you need", sub?:"<the red step\'s id>", options?:[{label, why?, plan, actions?}] (at most three, ranked)')}` : '',
+      report(`kind:"plan", ${job.replan ? 'label?, why?, actions?:[{type,sub,note?,position?,evidence?,fix?}], diagnosis?:{summary,evidence?:[{label,detail}]}, alternatives?:[{label,why?,plan,actions?}], ' : ''}plan:{context, stories:[{id,key?,project?,title,fields?:[{name,value}]}], workflows:{PROJECT:[status]}, jiraSite?, subJobs:[{id,title,kind:"pr"|"session"|"human"|"write",repo,base?,storyId?,jiraKey?,after:[],brief,check?,show?:["a thing to see"],on?:{sub,at},place?:{type,ref?,name?},action?,by?,review?,why?}]}`),
     ),
     implementation: lines(
       heading(job, sub),
@@ -240,12 +294,14 @@ export function jobPrompt(job, sub, run) {
       afterLine(job, sub),
       humanOutputBlock(job, sub),
       historyBlock(job, sub, run),
+      proofBlock(job, sub),
       // With code review on, the human reads the working tree on the board
       // before anything is committed; a later publish session commits and pushes,
       // so the branch rename waits for it too.
-      reviewCode(job) ? `Leave every change UNCOMMITTED: the human reviews the working tree before anything is committed, and a later step commits and pushes it${sub?.pr ? ' to the open PR' : ' and opens the PR'}. Do not commit, push or open a PR.` : branchNaming(job, sub),
+      leavesUncommitted(job, sub) ? `Leave every change UNCOMMITTED: ${reviewCode(job) ? 'the human reviews the working tree before anything is committed, and a ' : 'a '}later step commits and pushes it${sub?.pr ? ' to the open PR' : ' and opens the PR'}. Do not commit, push or open a PR.` : branchNaming(job, sub),
+      reviewCode(job) ? 'After you report ready your session stays open, paused, so the human can write to you by mail: a question is answered with job_report kind:"reply" (text, shots?, run?, running?) and changes nothing; a change is made, re-verified and reported ready again as a new round. Do not end the session or clean up the worktree yourself.' : '',
       '',
-      reviewCode(job) ? report('kind:"ready", checks:["what you verified"]', 'When the working tree is ready to review, ') : publishLine,
+      leavesUncommitted(job, sub) ? report(`kind:"ready", checks:["what you verified", {text:"<a Show me item, verbatim>", shots:[...] | run:{cmd,out,exit} | couldNot:"why"}]${reviewCode(job) ? ', running?:[{name, url?, pid?, stop?, log?}]' : ''}`, 'When the working tree is ready to review, ') : publishLine,
     ),
     publish: lines(
       heading(job, sub),
