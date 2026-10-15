@@ -1089,7 +1089,7 @@ export function initJobsView({ send, stageImage, frameOf = sourceToFrame, getAge
         ${yours ? `<form id="job-human-form" data-state="${esc(sub.state)}"><label>Result for dependent work <small title="Up to 8,000 characters, passed to dependent agents">optional</small><textarea name="output" maxlength="8000" rows="4"></textarea></label><div class="job-actions tone-${STATES[state].tone}"><button class="primary" type="submit" title="${esc(hints.find((h) => h.startsWith('No agent')) || '')}">${ICONS.check}Mark done</button>${sub.state === 'doing' ? '' : '<button type="button" data-action="start-human">Mark in progress</button>'}</div></form>` : ''}`;
       actions = retry;
     } else {
-      body = `${sub.stage === 'review' && sub.ready ? (hasProof(sub) ? `${proofGridHtml(job, sub)}${alsoCheckedHtml(sub)}` : `<h3>Ready for review</h3>${receiptHtml(sub.ready.checks)}`) : ''}${sub.stage === 'review' ? `${runningBarHtml(job, sub, { logs: runLogs.get(sub.id) })}${earlierRoundsHtml(job, sub)}${threadHtml(job, sub)}` : ''}
+      body = `${sub.ready ? (hasProof(sub) ? `${proofGridHtml(job, sub)}${alsoCheckedHtml(sub)}` : `<h3>${sub.stage === 'review' ? 'Ready for review' : 'Verified'}</h3>${receiptHtml(sub.ready.checks)}`) : ''}${sub.stage === 'review' ? `${runningBarHtml(job, sub, { logs: runLogs.get(sub.id) })}${earlierRoundsHtml(job, sub)}${threadHtml(job, sub)}` : ''}
         ${sub.pr?.checks?.length ? `<h3>Checks</h3><ul class="job-checks">${sub.pr.checks.map((c) => `<li class="${checkTone(c.state)}">${checkMark(c.state)} ${esc(c.name)} <small>${esc(c.state.toLowerCase())}</small></li>`).join('')}</ul>` : ''}
         ${sub.pr ? commentsHtml(sub, commentsShown) : ''}
         ${sub.deploymentResult ? `<h3>Deployment pipelines</h3><ul class="job-checks">${sub.deploymentResult.runs.map((r) => `<li class="${checkTone(r.status)}">${checkMark(r.status)} ${link(r.url, r.workflow)} <small>${esc(r.status)}${r.supersedes ? ` · on ${esc(String(r.commit || '').slice(0, 8))}, which replaced the cancelled run` : ''}</small></li>`).join('')}</ul>` : ''}
@@ -1120,7 +1120,8 @@ export function initJobsView({ send, stageImage, frameOf = sourceToFrame, getAge
     dialog.querySelector('[data-proof-back]').onclick = () => { proofView = null; renderDetail(); };
     dialog.querySelectorAll('[data-proof-go]').forEach((b) => b.onclick = () => { proofView = { i: +b.dataset.proofGo, j: 0 }; renderDetail(); });
     dialog.querySelectorAll('[data-proof-shot]').forEach((b) => b.onclick = () => { proofView = { ...proofView, j: +b.dataset.proofShot }; renderDetail(); });
-    dialog.querySelector('[data-proof-ask]').onclick = () => {
+    const ask = dialog.querySelector('[data-proof-ask]');
+    if (ask) ask.onclick = () => {
       askDraft = { subId: sub.id, text: item.couldNot ? `You couldn’t show “${item.text}”. Please try another way: ` : `About “${item.text}”: ` };
       proofView = null;
       renderDetail();
@@ -1140,7 +1141,7 @@ export function initJobsView({ send, stageImage, frameOf = sourceToFrame, getAge
     const viewing = sub && proofView && proofItems(sub).length > proofView.i && !isWriteSub(sub);
     if (!viewing) proofView = null;
     flags.painting = true;
-    show(viewing ? proofViewerHtml(job, sub, proofView, evidence, { branch: sub.worktree?.branch }) : sub ? subDetail(job, sub) : jobDetail(job));
+    show(viewing ? proofViewerHtml(job, sub, proofView, evidence, { branch: sub.worktree?.branch, ask: sub.stage === 'review' }) : sub ? subDetail(job, sub) : jobDetail(job));
     flags.painting = false;
     if (viewing) { wireProofViewer(job, sub); return; }
     wireFooter();

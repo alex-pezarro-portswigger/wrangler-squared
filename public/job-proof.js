@@ -91,7 +91,7 @@ export const alsoCheckedHtml = (sub) => {
 // The shot viewer: one item full size with where and how it was captured, the
 // other items as a strip, and the way back to the box with the question started.
 // `view` is { i, j }: the item, and which of its shots.
-export function proofViewerHtml(job, sub, view, cache, { branch = '' } = {}) {
+export function proofViewerHtml(job, sub, view, cache, { branch = '', ask = true } = {}) {
   const items = proofItems(sub), i = Math.min(Math.max(view.i || 0, 0), items.length - 1), p = items[i];
   if (!p) return '';
   const shots = shotsOf(p), j = Math.min(Math.max(view.j || 0, 0), Math.max(shots.length - 1, 0)), shot = shots[j];
@@ -114,7 +114,7 @@ export function proofViewerHtml(job, sub, view, cache, { branch = '' } = {}) {
     <div class="job-chips job-detail-meta"><span class="job-chip">${ICONS.eye}<span>Round ${round}</span></span>${branch ? `<span class="job-chip job-plan-branch">${ICONS.branch}<span>${esc(branch)}</span></span>` : ''}</div></header>
     <div class="job-proof-viewer">${stage}<div class="job-proof-side"><h3 class="${p.couldNot ? 'gap' : ''}"><span aria-hidden="true">${p.couldNot ? '!' : '✓'}</span><span>${esc(p.text)}</span></h3>
       ${p.note ? `<p>${esc(p.note)}</p>` : ''}${p.couldNot ? '<p>The plan asked for this to be shown. You decide whether what covers it instead is enough, or ask for another way.</p>' : ''}${meta}
-      <div class="job-actions"><button type="button" data-proof-ask="${i}">${ICONS.edit}${p.couldNot ? 'Ask it to try another way' : 'Ask about this'}</button></div>${shotStrip}<div class="job-proof-strip">${strip}</div></div></div>`;
+      ${ask ? `<div class="job-actions"><button type="button" data-proof-ask="${i}">${ICONS.edit}${p.couldNot ? 'Ask it to try another way' : 'Ask about this'}</button></div>` : ''}${shotStrip}<div class="job-proof-strip">${strip}</div></div></div>`;
 }
 
 // The board plate's filmstrip: the first shots of what is waiting to be verified.

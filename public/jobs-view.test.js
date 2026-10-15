@@ -2191,6 +2191,22 @@ test('a receipt with no proof keeps the Ready for review list exactly as before'
   assert.equal(f.sent.some((m) => m.type === 'job-evidence'), false);
 });
 
+test('a delivered sub-job keeps what it verified: the checks as Verified, or its proof with no Ask', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'done';
+  job.subJobs = [proofSub({ show: undefined, stage: 'done', state: 'done', ready: { checks: ['Tests pass'], receiptId: 'run_1' } })];
+  f.view.update(f.data);
+  f.q('[data-filter="done"]').click();
+  f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  assert.ok([...f.q('#job-dialog').querySelectorAll('h3')].some((h) => h.textContent === 'Verified'));
+  assert.deepEqual([...f.q('#job-dialog .job-receipt').querySelectorAll('li')].map((li) => li.textContent.trim()), ['✓ Tests pass']);
+  job.subJobs = [proofSub({ stage: 'done', state: 'done' })];
+  f.view.update(f.data);
+  f.q('[data-sub="api"]').dispatchEvent(f.event('click'));
+  assert.ok(f.q('#job-dialog .job-proof'), 'the Shown working grid stays');
+  f.q('#job-dialog [data-proof="0"]').click();
+  assert.equal(f.q('#job-dialog [data-proof-ask]'), null, 'nothing is left to ask a delivered step');
+});
+
 test('a card opens the shot viewer: where it was taken, a reason in full, a way back, and Ask about this starts the box', (t) => {
   const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
   job.subJobs = [proofSub()];
