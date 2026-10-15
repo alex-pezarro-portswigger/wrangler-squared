@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 //
 // These two survive because nothing on the façade does them. Cleanup is a
 // compare-and-delete the extension owns (job-runtime.js cleanupWorktree): it
-// verifies the branch head against what the merged PR retains and only then
+// verifies nothing on the branch or in the tree would be lost and only then
 // removes the worktree, and core's archive-time offer is a UI prompt to a human,
 // not something an extension can drive. `gitRepoRoot` answers "which checkout is
 // this" for the `updateMain` fast-forward, which never runs in a worktree.
@@ -29,20 +29,24 @@ export async function gitRepoRoot(cwd) {
   }
 }
 
-// Uncommitted and untracked files included: every caller has already decided the
-// work is disposable (cleanup verified the branch head is what the merged PR
-// retains — commits are guarded there, working-tree dirt is not). A missing dir
-// is a no-op success.
-export async function removeWorktree({ worktreePath, repoRoot = '' }) {
+// `force` deletes uncommitted and untracked files too: only for a caller that
+// has decided they are disposable (a Discard of exactly the state it was shown).
+// Unforced, git refuses a tree that is not clean, which closes the gap between
+// cleanup's inspection and the delete; ignored files go either way. A tree
+// holding a submodule cannot be removed unforced at all; that refusal is
+// flagged `submodules` for the caller to decide. A missing dir is a no-op
+// success.
+export async function removeWorktree({ worktreePath, repoRoot = '', force = true }) {
   if (!worktreePath) throw new WorktreeError('No worktree path');
   if (!fs.existsSync(worktreePath)) return { ok: true, alreadyGone: true };
   const root = repoRoot || (await gitRepoRoot(worktreePath));
   if (!root) throw new WorktreeError('Could not resolve the repository for this worktree');
   try {
-    await exec('git', ['-C', root, 'worktree', 'remove', '--force', worktreePath]);
+    await exec('git', ['-C', root, 'worktree', 'remove', ...(force ? ['--force'] : []), worktreePath]);
     return { ok: true };
   } catch (e) {
-    throw new WorktreeError(`git worktree remove failed: ${(e.stderr || e.message || '').toString().trim()}`);
+    const stderr = (e.stderr || e.message || '').toString().trim();
+    throw Object.assign(new WorktreeError(`git worktree remove failed: ${stderr}`), { submodules: !force && /submodules/.test(stderr) });
   }
 }
 

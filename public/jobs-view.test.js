@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Window } from 'happy-dom';
 import { initJobsView, isPrimaryActionKey, primaryAction } from './jobs-view.js';
 import { CHECKPOINTS, reviewDefaultsOf, jobCards, jobStatus, jobNeedsReview, dependencyLevels, mergeHeldByComments, changeView, eventFor, writeReviewed, heldByReplan, redScope, changeHint } from './jobs.js';
-import { planGraphHtml } from './job-graph.js';
+import { planGraphHtml, layoutGraphEdges } from './job-graph.js';
 import { plateHtml, plateAsk } from './job-plates.js';
 import { subState, subLabel, subLine, jobState, jobLabel } from './job-state.js';
 
@@ -107,6 +107,9 @@ test('each job is its own card, and a delivered job only returns with Finished',
   assert.deepEqual(boards(), ['job3'], 'Finished shows only the finished');
   assert.ok(f.q('[data-board="job3"]').classList.contains('tone-ok'));
   assert.deepEqual([...document.querySelectorAll('.jobs-rail-n')].map((n) => n.textContent), ['2', '', '0', '0', '1'], 'each filter counts its jobs; Needs you stays blank at none');
+  const sky = f.q('.jobs-top > canvas.jobs-mast-sky');
+  assert.equal(sky?.getAttribute('aria-hidden'), 'true', 'the masthead sits on its own painted sky, hidden from assistive tech');
+  assert.equal(f.q('.jobs-top').firstElementChild, sky, 'the sky comes first, under the title and tools');
   f.q('[data-filter="all"]').click();
   f.q('.job-plate-open').click(); assert.equal(f.q('#job-dialog h2').textContent, 'Checkout');
   f.q('[data-sub="cart"]').dispatchEvent(f.event('click'));
@@ -148,6 +151,31 @@ test('a step waiting on a prompt is the human’s: it says so, and it counts und
   f.q('.job-plate-open').click(); assert.equal(f.q('#job-dialog [data-fab-session]'), null, 'no session to answer yet');
   job.subJobs[0].sessions = ['s9']; f.view.update(f.data);
   f.q('#job-dialog [data-fab-session]').click(); assert.deepEqual(f.sessions, ['s9'], 'the job’s one button opens the prompt');
+});
+
+test('a planning session waiting on a prompt is one click away, from the plate and from the job', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.plan = null;
+  job.runs = [{ id: 'p1', subJobId: null, phase: 'planning', stopped: false, status: 'needs-you', sessionId: 'plan-card' }];
+  f.view.update(f.data);
+  assert.equal(f.q('[data-board="job1"] .job-plate-detail').textContent, 'Planning');
+  f.q('[data-board="job1"] .job-plate-go').click();
+  assert.deepEqual(f.sessions, ['plan-card'], 'Answer goes straight to the planning card');
+  f.q('.job-plate-open').click();
+  const fab = f.q('#job-dialog [data-fab-session]');
+  assert.equal(fab.title, 'Planning · Prompt waiting');
+  fab.click(); assert.deepEqual(f.sessions, ['plan-card', 'plan-card']); assert.equal(f.q('#job-dialog').open, false);
+});
+
+test('the job’s button answers a waiting prompt before a merge, and says how many more wait', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
+  job.subJobs = [{ ...sub('api'), stage: 'pr', pr: { url: 'https://github.com/org/repo/pull/1', head: 'head1', checkStatus: 'passing', checks: [] } },
+    { ...sub('docs'), kind: 'session', stage: 'session', sessions: ['docs-card'] }, { ...sub('ui'), kind: 'session', stage: 'session', sessions: ['ui-card'] }];
+  job.runs = [{ id: 'r1', subJobId: 'docs', phase: 'session', stopped: false, status: 'needs-you', startedAt: 1 }, { id: 'r2', subJobId: 'ui', phase: 'session', stopped: false, status: 'needs-you', sessionId: 'ui-card', startedAt: 2 }];
+  f.view.update(f.data); f.q('.job-plate-open').click();
+  assert.equal(f.q('#job-dialog [data-action="approve-merge"]'), null, 'the merge waits behind the prompt');
+  const fab = f.q('#job-dialog [data-fab-session]');
+  assert.equal(fab.title, 'Deliver docs · Prompt waiting · +1 more waiting');
+  fab.click(); assert.deepEqual(f.sessions, ['docs-card']);
 });
 
 test('the event box names what happened, escaped, and Add idea is the way to answer it', (t) => {
@@ -322,14 +350,18 @@ test('the plan under review shows the shared context, each brief and each check 
   assert.match(approve.title, /Approve starts work in dedicated worktrees/, 'what approval does is one hover away');
 });
 
-test('the plan review has no branch field; a sub-job\'s detail shows the branch its worktree is actually on', (t) => {
+test('the plan review names no worktree branch, and a cut PR tile shows it; a sub-job\'s detail shows the branch its worktree is actually on', (t) => {
   const f = fixture(t); f.q('.job-plate-open[data-job=\"job1\"]').click();
   assert.equal(f.q('[data-branch]'), null); assert.equal(f.q('.job-plan-branch'), null);
   f.q('#job-dialog').close();
   const [job] = f.data.jobs; job.stage = 'active';
   job.subJobs = [{ ...sub('api'), stage: 'implementation', worktree: { path: '/wt/api', branch: 'fix/AUTH-1-api', repoRoot: '/repo' } }, { ...sub('web', ['api']), stage: 'implementation' }]; f.view.update(f.data);
   f.q('.job-plate-open[data-job=\"job1\"]').click();
-  assert.equal(f.q('.job-plan-branch'), null, 'the graph stays uncluttered');
+  assert.equal(f.q('[data-node="api"] .job-node-wt').textContent, 'fix/AUTH-1-api', 'a cut PR shows its worktree branch on its tile');
+  assert.equal(f.q('[data-node="api"] .job-node-landing').textContent, 'fix/AUTH-1-api→default branch');
+  assert.equal(f.q('[data-node="web"] .job-node-wt'), null, 'not cut yet: only where it lands');
+  assert.ok(f.q('[data-node="web"] .job-node-base.default'), 'muted when it is the default branch');
+  assert.match(f.q('[data-open-sub="api"]').title, /Lands on the default branch\nBranch fix\/AUTH-1-api/, 'both are a hover away');
   f.q('[data-open-sub="api"]').click();
   assert.equal(f.q('.job-detail-meta .job-plan-branch').textContent, 'fix/AUTH-1-api');
   f.q('#job-dialog').close(); f.q('.job-plate-open[data-job=\"job1\"]').click(); f.q('[data-open-sub="web"]').click();
@@ -1008,9 +1040,30 @@ test('the detail dialog shows a sub-job price with the job total behind it, and 
   assert.deepEqual([...document.querySelectorAll('#job-dialog .job-detail-cost')].map((e) => e.textContent), ['$12.50']);
 });
 
+// Each column's tiles in order, read from the grid's stacks (`data-col`).
+const graphColumns = (document) => [...document.querySelectorAll('.job-stack[data-col]')].reduce((cols, el) => {
+  (cols[+el.dataset.col] ||= []).push(...[...el.querySelectorAll('.job-node')].map((n) => n.dataset.node)); return cols;
+}, []);
+// Points along a connector's `d` (M, H and C only), for clearance checks.
+const pathPoints = (d) => {
+  const pts = [];
+  let x = 0, y = 0;
+  for (const [, op, args] of d.matchAll(/([MHC])([^MHC]*)/g)) {
+    const n = args.split(/[ ,]+/).filter(Boolean).map(Number);
+    if (op === 'M') [x, y] = n;
+    else if (op === 'H') { for (let i = 0; i <= 20; i++) pts.push([x + (n[0] - x) * i / 20, y]); x = n[0]; }
+    else {
+      const [x1, y1, x2, y2, x3, y3] = n;
+      for (let i = 0; i <= 40; i++) { const t = i / 40, u = 1 - t; pts.push([u ** 3 * x + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t ** 3 * x3, u ** 3 * y + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t ** 3 * y3]); }
+      [x, y] = [x3, y3];
+    }
+  }
+  return pts;
+};
+
 test('the plan is a dependency graph: a box per sub-job in its wave, an arrow per prerequisite, and a dependency edit moves the box', (t) => {
   const f = fixture(t); f.q('.job-plate-open[data-job=\"job1\"]').click();
-  const waves = () => [...document.querySelectorAll('.job-graph-col')].map((c) => [...c.querySelectorAll('.job-node')].map((n) => n.dataset.node));
+  const waves = () => graphColumns(document);
   const arrows = () => [...document.querySelectorAll('.job-graph-edges path[data-from]')].map((p) => `${p.dataset.from}→${p.dataset.to}`);
   assert.deepEqual(waves(), [['api'], ['web']]); assert.deepEqual(arrows(), ['api→web']);
   assert.deepEqual([...document.querySelectorAll('.job-node-tile .job-kind')].map((k) => k.getAttribute('aria-label')), ['PR', 'PR']);
@@ -1055,6 +1108,58 @@ test('a PR node names its repo under the title in every graph mode; session, hum
     assert.equal(document.querySelector('.job-node-title + .job-node-repo')?.textContent, 'wrangler-squared', 'the repo sits right under the title');
     assert.match(document.querySelector('[data-node="api"]').title, /wrangler-squared/);
   }
+});
+
+test('every column shares one row grid, and a connector that skips a wave takes a lane under the tile it passes', () => {
+  const plan = { stories: [], subJobs: [sub('api'), sub('web', ['api']), sub('docs', ['api', 'web'])] };
+  const { document } = new Window();
+  document.body.innerHTML = planGraphHtml(plan, {});
+  assert.deepEqual([...document.querySelectorAll('.job-stack[data-col]')].map((el) => [el.querySelector('[data-node]').dataset.node, el.style.gridColumn, el.style.gridRow]),
+    [['api', '1', '1'], ['web', '3', '1'], ['docs', '5', '1']], 'tiles on one row line up across columns; gutters are the even tracks');
+  assert.deepEqual([...document.querySelectorAll('.job-graph-pass')].map((el) => [el.dataset.pass, el.style.gridColumn, el.style.gridRow]), [['api>docs', '3', '2']],
+    'web holds row 1 of its column, so the lane takes the channel just under it');
+});
+
+test('connectors run level between rows and change row in one smooth curve that never enters a tile or a title', () => {
+  const plan = { stories: [], subJobs: [sub('api'), sub('web', ['api']), sub('docs', ['api', 'web'])] };
+  const { document } = new Window();
+  document.body.innerHTML = planGraphHtml(plan, {});
+  const rect = (left, top, width, height) => () => ({ left, top, width, height, right: left + width, bottom: top + height });
+  const at = (el, r) => { el.getBoundingClientRect = r; };
+  at(document.querySelector('.job-graph-canvas'), rect(0, 0, 540, 240));
+  const obstacles = [];
+  ['api', 'web', 'docs'].forEach((id, i) => {
+    const tile = [i * 196 + 44, 0, 60, 60], title = [i * 196 + 14, 64, 120, 18];
+    at(document.querySelector(`[data-node="${id}"]`).closest('[data-col]'), rect(i * 196, 0, 148, 110));
+    at(document.querySelector(`[data-node="${id}"] .job-node-tile`), rect(...tile));
+    at(document.querySelector(`[data-node="${id}"] .job-node-title`), rect(...title));
+    obstacles.push(tile, title);
+  });
+  at(document.querySelector('.job-graph-pass'), rect(196, 120, 148, 2));
+  layoutGraphEdges(document.querySelector('.job-graph'));
+  const d = (from, to) => document.querySelector(`path[data-from="${from}"][data-to="${to}"]`).getAttribute('d');
+  assert.equal(d('api', 'web'), 'M110 30 H234', 'tiles on one row are joined by one straight line');
+  const skip = d('api', 'docs');
+  assert.match(skip, /^M110 30 H[\d.]+ C[^C]+ H344 H[\d.]+ C[^C]+ H430$/, 'level runs, and one curve into the lane and one out of it');
+  for (const curve of skip.matchAll(/C([\d.]+) ([\d.]+), ([\d.]+) ([\d.]+), [\d.]+ ([\d.]+)/g)) {
+    const [, , y1, , y2, y3] = curve.map(Number);
+    assert.ok(y1 !== y3 && y2 === y3, 'each curve leaves and arrives level, so the line has no corner');
+  }
+  for (const id of ['api>web', 'api>docs', 'web>docs']) {
+    const [from, to] = id.split('>');
+    for (const [x, y] of pathPoints(d(from, to)).slice(1, -1)) {
+      assert.ok(!obstacles.some(([l, t, w, h]) => x > l && x < l + w && y > t && y < t + h), `${id} passes (${x}, ${y}) through a tile or title`);
+    }
+  }
+  assert.deepEqual([...document.querySelectorAll('.job-edge-glyph')].map((g) => [g.dataset.glyph, g.getAttribute('transform')]), [['api', 'translate(124 30)'], ['web', 'translate(320 30)']],
+    'a PR has one rocket, beside its tile, however many connectors wait for it to deploy');
+});
+
+test('each column after the first is ordered by where its predecessors sit, so connectors run short and uncrossed', () => {
+  const plan = { stories: [], subJobs: [sub('a'), sub('b'), sub('late', ['b']), sub('early', ['a'])] };
+  const { document } = new Window();
+  document.body.innerHTML = planGraphHtml(plan, {});
+  assert.deepEqual(graphColumns(document), [['a', 'b'], ['early', 'late']]);
 });
 
 test('a merge that deploys nothing says so in the detail', (t) => {
@@ -2379,4 +2484,67 @@ test('Red steps is the sixth checkpoint (You decide / Wrangler replans) and Repl
   assert.equal(f.q('.job-detail-footer [data-review="reviewRed"]').getAttribute('aria-label'), 'Red steps: Wrangler replans. Switch to You decide');
   f.q('.job-detail-footer [data-review="reviewRed"]').click();
   assert.deepEqual([f.sent.at(-1).action, f.sent.at(-1).field, f.sent.at(-1).you, f.sent.at(-1).release], ['set-review', 'reviewRed', true, undefined], 'nothing waits at this checkpoint, so it never asks first');
+});
+
+test('a refused cleanup on a dropped sub-job shows what would be lost, and Discard echoes back exactly the list it showed', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active'; job.cancelledAt = 1;
+  const refusal = { path: '/wt/api', branch: 'job-api', base: 'main', head: 'cc47137aaaa', fingerprint: 'fp1',
+    commits: [{ sha: 'abc12345ffff', subject: '<b>Local</b> work', pushed: false }], commitCount: 1,
+    files: [{ change: 'untracked', path: 'server/mcp/tools/list-models.js' }], fileCount: 3 };
+  job.subJobs = [{ ...sub('api'), stage: 'cleanup', state: 'cancelled', cancelledAt: 1, worktree: { path: '/wt/api', branch: 'job-api' },
+    error: 'Worktree has work that would be lost (1 commit not on origin/main, 3 uncommitted files); preserve it for review', cleanupRefusal: refusal }];
+  f.view.update(f.data);
+  assert.equal(eventFor(job, job.subJobs[0]).title, 'Worktree kept');
+  assert.equal(jobNeedsReview(job, job.subJobs[0]), true);
+  f.view.openDetail('job1', 'api');
+  const text = () => f.q('#job-dialog').textContent;
+  assert.match(text(), /1 commit not on origin\/main/); assert.match(text(), /<b>Local<\/b> work/, 'agent-written subjects are text, not markup');
+  assert.match(text(), /list-models\.js/); assert.match(text(), /and 2 more/);
+  f.q('#job-discard').click();
+  assert.equal(f.sent.length, 0, 'discarding needs a confirmation first');
+  assert.ok(f.q('#job-discard-form'), 'a form, so a live graph tick leaves the question alone');
+  assert.equal(primaryAction(f.q('#job-dialog')), null, 'Cmd+Enter cannot discard work');
+  assert.match(text(), /lost for good/); assert.match(text(), /list-models\.js/);
+  f.q('[data-discard]').click();
+  assert.deepEqual(f.sent.at(-1), { type: 'job-action', id: 'job1', subJobId: 'api', action: 'discard-worktree', discardHead: 'cc47137aaaa', fingerprint: 'fp1' });
+  job.subJobs[0] = { ...job.subJobs[0], error: null, discard: { head: 'cc47137aaaa', fingerprint: 'fp1' } }; f.view.update(f.data);
+  f.view.openDetail('job1', 'api');
+  assert.equal(f.q('#job-discard'), null, 'a discard already chosen is not offered twice');
+});
+
+test('every PR tile shows its worktree branch → where it lands, the override marked and long names truncated', (t) => {
+  const f = fixture(t); const [job] = f.data.jobs; job.stage = 'active'; job.base = 'next';
+  job.subJobs = [{ ...sub('api'), stage: 'implementation', base: 'release/2.x', worktree: { path: '/wt/api', branch: 'fix/api-2x', repoRoot: '/repo' } },
+    { ...sub('web', ['api']), stage: 'implementation' }, { ...sub('same', ['api']), stage: 'implementation', base: 'next' }];
+  f.view.update(f.data); f.q('.job-plate-open[data-job=\"job1\"]').click();
+  assert.deepEqual([...document.querySelectorAll('.job-node-landing')].map((e) => [e.closest('[data-node]').dataset.node, e.textContent]), [['api', 'fix/api-2x→release/2.x'], ['web', '→next'], ['same', '→next']], 'every PR names where it lands');
+  assert.deepEqual([...document.querySelectorAll('.job-node-base.own')].map((e) => e.closest('[data-node]').dataset.node), ['api'], 'only the override is marked');
+  const long = 'feature/' + 'a'.repeat(80); job.subJobs[2].worktree = { path: '/wt/s', branch: long }; f.view.update(f.data);
+  assert.equal(f.q('[data-node="same"] .job-node-wt').textContent, long, 'the whole name is in the markup, CSS truncates it');
+  assert.match(f.q('[data-node="same"] .job-node-landing').title, new RegExp(`Branch ${long}\\nLands on next`), 'and whole in the tooltip');
+  assert.match(f.q('[data-open-sub="api"]').title, /Lands on release\/2\.x, not the job's next/);
+  assert.match(f.q('[data-open-sub="web"]').title, /Lands on next/);
+  assert.match(f.q('#job-dialog .job-chips').textContent, /→ next/, 'the job\'s own base heads the job');
+  f.q('[data-open-sub="api"]').click();
+  assert.equal(f.q('.job-detail-meta .job-plan-branch').textContent, 'fix/api-2x → release/2.x', 'worktree branch and target are one chip');
+  f.q('#job-dialog').close(); f.q('.job-plate-open[data-job=\"job1\"]').click(); f.q('[data-open-sub="web"]').click();
+  assert.match(f.q('.job-detail-meta').textContent, /→ next/, 'no worktree yet: just where it lands');
+});
+
+test('plan review sets a PR\'s own base from its branch pill, and blank lands where the job does', (t) => {
+  const f = fixture(t); f.q('.job-plate-open[data-job=\"job1\"]').click();
+  const pills = document.querySelectorAll('details[data-base-of]');
+  assert.equal(pills.length, f.data.jobs[0].plan.subJobs.filter((s) => (s.kind || 'pr') === 'pr').length, 'one per PR');
+  assert.equal(f.q('.job-node-base.own'), null);
+  assert.equal(f.q('details[data-base-of] summary').textContent, 'default branch', 'blank shows where it would land');
+  const input = f.q('[data-base="0"]'); assert.equal(input.placeholder, 'Default branch');
+  input.value = ' release/2.x '; input.dispatchEvent(f.event('change'));
+  assert.equal(f.q('.job-node-base.own').textContent, 'release/2.x');
+  assert.equal(f.q('details[data-base-of] summary').textContent, 'release/2.x');
+  f.q('[data-action="approve-plan"]').click();
+  assert.equal(f.sent.at(-1).plan.subJobs[0].base, 'release/2.x');
+  const again = f.q('[data-base="0"]'); again.value = ''; again.dispatchEvent(f.event('change'));
+  assert.equal(f.q('.job-node-base.own'), null);
+  f.q('[data-action="approve-plan"]').click();
+  assert.equal('base' in f.sent.at(-1).plan.subJobs[0], false, 'cleared, it is gone rather than empty');
 });

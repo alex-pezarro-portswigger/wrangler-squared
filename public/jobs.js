@@ -15,6 +15,10 @@ export const writeReviewed = (job, sub) => sub?.review ?? job?.reviewWrites ?? f
 // Mirrors server/jobs-schema.js isPrSub: a PR is the only kind with a repository,
 // a pipeline and a deploy gate, so "not a PR" is what those rules turn on.
 export const isPrSub = (sub) => !isSessionSub(sub) && !isHumanSub(sub) && !isWriteSub(sub);
+// Mirrors server/jobs-schema.js targetOf; null is the repository's default.
+export const targetOf = (job, sub) => sub?.base || job?.base || null;
+// A PR whose own base differs from the job's: the only branch a graph tile shows.
+export const offBase = (job, sub) => isPrSub(sub) && !!sub.base && sub.base !== job?.base;
 // The stories session never stops for Session results review: its writes are
 // its result (server/job-store.js), so it alone does not make the switch matter.
 export const reviewedSession = (sub) => isSessionSub(sub) && !sub.stories;
@@ -273,6 +277,12 @@ export const answeringLabel = (sub) => ({ ask: 'Answering you', retell: 'Recheck
 // tick (server/index.js withRunStatus). 'needs-you' is the one the board acts on:
 // an automated step stuck on a prompt is nobody's but the human's.
 export const runStatus = (job, sub) => liveRun(job, sub)?.status ?? null;
+// Every live run stuck on a prompt, oldest first, with the card to answer it on:
+// the run's own, since a planning run has no sub-job to look one up on.
+export const promptsWaiting = (job) => job.runs.filter((r) => !r.stopped && r.status === 'needs-you')
+  .map((run) => { const sub = job.subJobs?.find((s) => s.id === run.subJobId) || null; return { run, sub, sessionId: run.sessionId || sub?.sessions?.at(-1) || null }; })
+  .filter((p) => p.sessionId).sort((a, b) => (a.run.startedAt || 0) - (b.run.startedAt || 0));
+export const promptWhere = (job, p) => p.sub?.title || (job.stage === 'active' ? 'Re-planning' : 'Planning');
 export const sessionColumn = (job, sub) => sub.stage === 'session' ? (liveRun(job, sub) ? 'running' : 'queued') : sub.stage === 'review' ? 'review' : 'done';
 export const humanColumn = (sub) => sub.stage !== 'human' ? 'done' : sub.state === 'doing' ? 'doing' : 'waiting';
 // Nothing automatic will ever move a waiting human task whose prerequisites are
@@ -376,6 +386,7 @@ export function changeView(job, sub) {
 // the detail line — the agent's own sentence, or the observation — do the work.
 export const prNumber = (sub) => (sub?.pr?.url || '').split('/').filter(Boolean).pop();
 function eventTitle(sub) {
+  if (sub.cleanupRefusal) return 'Worktree kept';
   if (sub.blocked?.summary && sub.blocked.summary === sub.error) return 'Worker blocked';
   if (/closed without merging/i.test(sub.error)) return 'PR was closed';
   if (/repair limit/i.test(sub.error)) return prNumber(sub) ? `Checks failing on #${prNumber(sub)}` : 'Checks failing';
@@ -389,7 +400,8 @@ function eventTitle(sub) {
 // What happened, in one line.
 export function eventFor(job, sub) {
   if (!sub) return job.error ? { title: 'Job needs attention', detail: job.error } : null;
-  if (sub.cancelledAt) return null;
+  // A dropped sub-job's only event is a refused cleanup: the one thing left for a human.
+  if (sub.cancelledAt && !sub.error) return null;
   // The failure itself stays as the event; `fix` is what Wrangler has done about it.
   const base = { title: eventTitle(sub), detail: sub.error };
   if (sub.error && !job.error && redDeclared(job, sub)) { const d = sub.red.declared; return { ...base, fix: { kind: 'declared', title: 'Declared red', detail: d.summary, tried: d.tried || [], ask: d.ask || '', auto: !!d.auto, options: !!job.replan?.proposal?.escalation } }; }

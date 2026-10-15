@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { ATTRIBUTION, isHumanSub, reviewCode, placeOf, isMakeWrite, checkText } from './jobs-schema.js';
+import { ATTRIBUTION, targetOf, isHumanSub, reviewCode, placeOf, isMakeWrite, checkText } from './jobs-schema.js';
 import { inboxDir, roundDir } from './job-evidence.js';
 import { checkoutsDir, displayPath } from './data-dir.js';
 import { isFrozen, replanStatus } from './job-replan.js';
@@ -191,7 +191,7 @@ const passingWorkflows = (sub) => workflowsWith(sub, 'passing');
 const postMergeLine = (sub) => sub?.acceptedRed && sub.acceptedRed.ref === sub.pr?.mergeCommit && sub.deploymentResult?.status === 'failing'
   ? `post-merge runs FAILED (${workflowsWith(sub, 'failing') || 'unknown workflow'}) and the human accepted that${sub.acceptedRed.note ? ` — "${sub.acceptedRed.note}"` : ''}`
   : `post-merge runs passed${passingWorkflows(sub) ? ` (${passingWorkflows(sub)})` : ''}`;
-const thisPr = (sub, job) => `This PR (${sub?.repo ? path.basename(sub.repo) : 'this repository'}${job?.base ? `, landing on ${job.base}` : ''}): ${sub?.brief}`;
+const thisPr = (sub, job) => `This PR (${sub?.repo ? path.basename(sub.repo) : 'this repository'}${targetOf(job, sub) ? `, landing on ${targetOf(job, sub)}` : ''}): ${sub?.brief}`;
 // Show me: what the human reads at the Code checkpoint besides the diff. The
 // agent saves proof into the sub-job's evidence inbox and answers every item in
 // its `ready` receipt (job-store.js refuses one that leaves an item out).
@@ -248,7 +248,8 @@ export function jobPrompt(job, sub, run) {
   const checkouts = dir && displayPath(dir);
   const report = (body, lead = '') => `${lead}job_report {runId:"${run.id}", ${body}}. ${blockedLine}${run.phase === 'planning' ? '' : ` ${upLine}`}`;
   const attribution = `End the commit message${sub?.pr?.url ? '' : ' and the PR description'} with exactly this line:\n${ATTRIBUTION}`;
-  const baseFlag = job.base ? ` with \`gh pr create --base ${job.base}\` (this job lands on ${job.base}, not the default branch)` : '';
+  const target = targetOf(job, sub);
+  const baseFlag = target ? ` with \`gh pr create --base ${target}\` (this ${sub?.base ? 'PR' : 'job'} lands on ${target}, not the default branch)` : '';
   const publishLine = sub?.pr?.url ? report(`kind:"published", url:"${sub.pr.url}"`, `${attribution}\nCommit, push to the open PR, then `) : report('kind:"published", url:"<PR url>"', `${attribution}\nCommit, push, open the PR${baseFlag}, then `);
   const prompts = {
     planning: lines(
@@ -275,10 +276,11 @@ export function jobPrompt(job, sub, run) {
       'Never describe deployments or verification steps: Wrangler reads the repository\'s workflows to know whether a merge deploys and watches whatever GitHub starts. Give `check` (one line) ONLY when the pipeline cannot prove the change works where it lands, e.g. "helm shows the release in dev and prod". A session or human sub-job has no check: a session\'s receipt is its check.',
       'Give each PR sub-job `show`: 1–6 lines, written as THINGS TO SEE before its code is committed ("Filters by result and IP prefix", "Unit tests pass"), never work to do. Name a page or state for a UI change, a command\'s output otherwise; omit it only when nothing can be seen. Other kinds have none.',
       '`after` means START AFTER: a sub-job waits until every PR it is after has deployed and every session or human sub-job it is after is done (its output is an input). Each edge serialises the work, so add one only when the dependent needs the prerequisite live or its output. Minimise dependencies and PRs while keeping each piece independently deliverable. Do not propose branch names: the implementing session names its own.',
+      `base:"<branch>": only a PR not landing on ${job.base ? `\`${job.base}\`` : 'the default branch'}.`,
       job.replan ? replanBlock(job) : job.plan || job.previousPlan || job.feedback ? `Previous plan / feedback: ${JSON.stringify({ plan: job.plan || job.previousPlan, feedback: job.feedback })}` : '',
       '',
       job.replan?.red ? `If no fix or plan change can get this step past red without a decision only the human can make, declare it red instead: ${reportCall(run, 'kind:"escalate", summary:"what you found", tried?:["what you tried"], ask:"the one decision you need", sub?:"<the red step\'s id>", options?:[{label, why?, plan, actions?}] (at most three, ranked)')}` : '',
-      report(`kind:"plan", ${job.replan ? 'label?, why?, actions?:[{type,sub,note?,position?,evidence?,fix?}], diagnosis?:{summary,evidence?:[{label,detail}]}, alternatives?:[{label,why?,plan,actions?}], ' : ''}plan:{context, stories:[{id,key?,project?,title,fields?:[{name,value}]}], workflows:{PROJECT:[status]}, jiraSite?, subJobs:[{id,title,kind:"pr"|"session"|"human"|"write",repo,storyId?,jiraKey?,after:[],brief,check?,show?:["a thing to see"],on?:{sub,at},place?:{type,ref?,name?},action?,by?,review?,why?}]}`),
+      report(`kind:"plan", ${job.replan ? 'label?, why?, actions?:[{type,sub,note?,position?,evidence?,fix?}], diagnosis?:{summary,evidence?:[{label,detail}]}, alternatives?:[{label,why?,plan,actions?}], ' : ''}plan:{context, stories:[{id,key?,project?,title,fields?:[{name,value}]}], workflows:{PROJECT:[status]}, jiraSite?, subJobs:[{id,title,kind:"pr"|"session"|"human"|"write",repo,base?,storyId?,jiraKey?,after:[],brief,check?,show?:["a thing to see"],on?:{sub,at},place?:{type,ref?,name?},action?,by?,review?,why?}]}`),
     ),
     implementation: lines(
       heading(job, sub),

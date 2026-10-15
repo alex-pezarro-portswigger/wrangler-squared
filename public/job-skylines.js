@@ -165,20 +165,43 @@ function paint(art) {
   return true;
 }
 
-// Hover: the hole spins up (playbackRate ramps, so nothing jumps) and settles back on leave.
+// Hover: the hole spins up (playbackRate ramps, so nothing jumps) and settles back on leave. The ramp is
+// keyed to the sky, which outlives a re-render, and re-reads its animations each frame, since a re-render replaces them.
 const ramps = new WeakMap();
 function spinTo(plate, target) {
-  const anims = [...plate.querySelectorAll('.spin,.flow')].flatMap((e) => e.getAnimations());
-  if (!anims.length) return;
-  const from = anims[0].playbackRate, t0 = performance.now(), id = {};
-  ramps.set(plate, id);
+  const sky = plate.querySelector('.gx'), anims = () => [...sky.querySelectorAll('.spin,.flow')].flatMap((e) => e.getAnimations());
+  if (!sky || !anims().length) return;
+  const from = anims()[0].playbackRate, t0 = performance.now(), id = {};
+  ramps.set(sky, id);
   const step = (t) => {
-    if (ramps.get(plate) !== id) return;
+    if (ramps.get(sky) !== id) return;
     const k = Math.min(1, (t - t0) / 900), e = k < .5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
-    for (const a of anims) a.playbackRate = from + (target - from) * e;
+    for (const a of anims()) a.playbackRate = from + (target - from) * e;
     if (k < 1) requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
+}
+
+// Re-attaching an element restarts its CSS animations at rest (phase 0, rate 1), and the board rebuilds its
+// plates (and their border sweeps) on every graph tick: note where each stands before, and carry it over after.
+const held = new Map();
+const sweepOf = (plate) => plate.getAnimations({ subtree: true }).find((a) => a.animationName === 'gx-sweep');
+export function noteAnims(anims, into = new Map()) {
+  for (const a of anims) if (a.currentTime != null) into.set(a.effect.pseudoElement ? a.effect.target.dataset.board : a.effect.target, { t: a.currentTime, rate: a.playbackRate });
+  return into;
+}
+export function carryAnims(anims, from) {
+  for (const a of anims) {
+    const h = from.get(a.effect.pseudoElement ? a.effect.target.dataset.board : a.effect.target);
+    if (h) { a.currentTime = h.t; a.playbackRate = h.rate; }
+  }
+}
+// Call just before a board render replaces the plates mountSkies will be handed.
+export function holdSkies(host) {
+  held.clear();
+  if (typeof IntersectionObserver === 'undefined') return;
+  noteAnims([...host.querySelectorAll('.job-plate')].map(sweepOf).filter(Boolean), held);
+  for (const sky of kept.values()) if (sky.isConnected) noteAnims(sky.getAnimations({ subtree: true }), held);
 }
 
 // Painted skies outlive a board re-render: the board rebuilds its plates' markup on every graph tick, so a
@@ -204,12 +227,17 @@ function setup() {
   });
   resize.observe(document.body);
 }
+// `.hot` stands in for :hover on a freshly rendered plate, which the browser only marks hovered a frame later.
+let hot = null;
 function hover(host) {
   if (hosts.has(host) || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   hosts.add(host);
   const edge = (e, target) => {
     const plate = e.target.closest?.('.job-plate');
-    if (plate && !plate.contains(e.relatedTarget)) spinTo(plate, target);
+    if (!plate || plate.contains(e.relatedTarget)) return;
+    hot = target > 1 ? plate.dataset.board : null;
+    plate.classList.toggle('hot', target > 1);
+    spinTo(plate, target);
   };
   host.addEventListener('pointerover', (e) => edge(e, 24));
   host.addEventListener('pointerout', (e) => edge(e, 1));
@@ -220,6 +248,12 @@ export function mountSkies(host) {
   if (typeof IntersectionObserver === 'undefined') return;
   if (!near) setup();
   hover(host);
+  const lit = hot && host.querySelector(`.job-plate[data-board="${CSS.escape(hot)}"]`);
+  if (lit) {
+    lit.classList.add('hot');
+    // The pointer may have left while the plate was being replaced, so no pointerout will ever reach it.
+    requestAnimationFrame(() => { if (lit.isConnected && !lit.matches(':hover')) { if (hot === lit.dataset.board) hot = null; lit.classList.remove('hot'); spinTo(lit, 1); } });
+  }
   const live = new Set();
   for (const slot of host.querySelectorAll('.gx')) {
     const key = keyOf(slot), old = kept.get(key);
@@ -227,11 +261,57 @@ export function mountSkies(host) {
     if (old && !old.isConnected && old.firstChild) {
       slot.replaceWith(old);
       if (old.clientWidth !== widths.get(old) && paint(old)) widths.set(old, old.clientWidth);
+      else carryAnims(old.getAnimations({ subtree: true }), held);
       continue;
     }
     if (old === slot) continue;
     kept.set(key, slot);
     near.observe(slot); seen.observe(slot);
   }
+  carryAnims([...host.querySelectorAll('.job-plate')].map(sweepOf).filter(Boolean), held);
+  held.clear();
   for (const [key, a] of kept) if (!live.has(key)) { near.unobserve(a); seen.unobserve(a); widths.delete(a); kept.delete(key); }
+}
+
+// The masthead's sky: only the light from a plate's Gargantua, no disc, so the header doesn't repeat the
+// plates. An anamorphic streak spans the width from a hot core at the right, with lens ghosts on the line
+// through the frame's centre. Static: painted once per size, so it costs nothing between resizes.
+function paintGlare(c) {
+  const W = c.clientWidth, H = c.clientHeight;
+  if (!W || !H) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  c.width = Math.ceil(W * dpr); c.height = Math.ceil(H * dpr);
+  const x = c.getContext('2d');
+  if (!x) return;
+  x.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const pal = ramp(PAL.warn), r = rng('mast'), fx = W * .87, fy = H * .34;
+  x.fillStyle = '#020306'; x.fillRect(0, 0, W, H);
+  for (let i = 0, n = W * H / 650; i < n; i++) { const s = r() < .93 ? .7 : 1.3; x.fillStyle = `rgba(255,255,255,${(.15 + r() * .6).toFixed(2)})`; x.fillRect(r() * W, r() * H, s, s); }
+  x.globalCompositeOperation = 'lighter';
+  let g = x.createRadialGradient(fx, fy, 0, fx, fy, Math.max(W, H) * .55);
+  g.addColorStop(0, pal(.6, .42)); g.addColorStop(.3, pal(.34, .14)); g.addColorStop(1, pal(0, 0));
+  x.fillStyle = g; x.fillRect(0, 0, W, H);
+  const oval = (rx, ry, stops) => { x.save(); x.translate(fx, fy); x.scale(1, ry / rx); const b = x.createRadialGradient(0, 0, 0, 0, 0, rx); stops(b); x.fillStyle = b; x.beginPath(); x.arc(0, 0, rx, 0, Math.PI * 2); x.fill(); x.restore(); };
+  const streak = (rx, ry, a) => oval(rx, ry, (b) => { b.addColorStop(0, pal(.94, a)); b.addColorStop(.3, pal(.66, a * .55)); b.addColorStop(1, pal(0, 0)); });
+  streak(W * 1.1, 34, .28); streak(W * .95, 7, .75); streak(W * .8, 1.6, 1);
+  const spike = (len, ang, a) => { x.save(); x.translate(fx, fy); x.rotate(ang); x.scale(1, 1.2 / len); const b = x.createRadialGradient(0, 0, 0, 0, 0, len); b.addColorStop(0, `rgba(255,255,255,${a})`); b.addColorStop(1, 'rgba(255,255,255,0)'); x.fillStyle = b; x.beginPath(); x.arc(0, 0, len, 0, Math.PI * 2); x.fill(); x.restore(); };
+  spike(H * .5, Math.PI / 2, .7); spike(H * .28, Math.PI / 4, .35); spike(H * .28, -Math.PI / 4, .35);
+  g = x.createRadialGradient(fx, fy, 0, fx, fy, H * .34);
+  g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(.1, 'rgba(255,255,255,.85)'); g.addColorStop(.22, pal(.86, .55)); g.addColorStop(1, pal(0, 0));
+  x.fillStyle = g; x.fillRect(0, 0, W, H);
+  for (const [k, rad, a, tone] of [[.5, H * .07, .22, .7], [1.3, H * .16, .1, .45], [1.8, H * .05, .3, .8], [-.3, H * .1, .08, .55]]) {
+    const gx = fx + (W / 2 - fx) * k, gy = fy + (H * .3 - fy) * k;
+    g = x.createRadialGradient(gx, gy, rad * .55, gx, gy, rad);
+    g.addColorStop(0, pal(tone, a * .35)); g.addColorStop(.85, pal(tone, a)); g.addColorStop(1, pal(tone, 0));
+    x.fillStyle = g; x.beginPath(); x.arc(gx, gy, rad, 0, Math.PI * 2); x.fill();
+  }
+  x.globalCompositeOperation = 'source-over';
+}
+export function mountMastSky(canvas) {
+  if (typeof ResizeObserver === 'undefined') return;
+  let size = '';
+  new ResizeObserver(() => {
+    const now = `${canvas.clientWidth}x${canvas.clientHeight}`;
+    if (now !== size) { size = now; paintGlare(canvas); }
+  }).observe(canvas);
 }
