@@ -167,8 +167,8 @@ on `main` as their own small PRs. All are resolved.
 ## Tests
 
 `npm test` runs `node --test` over `server/*.test.js` and `public/*.test.js`:
-**449 tests, 448 pass, 1 skipped** (the `AW_REPO` guard); with `AW_REPO` set to
-a checkout serving host API 1.31 or later, all 449 pass. Per file: jobs 130, jobs-view 100,
+**601 tests, 600 pass, 1 skipped** (the `AW_REPO` guard); with `AW_REPO` set to
+a checkout serving host API 1.31 or later, all 601 pass. Per file: jobs 130, jobs-view 100,
 job-runtime 21, manifest 21, deploys 16, index 16, prompts 16, writes 12, sub-ops 6,
 model-picker 10, intro 9, images 8 (server) + 8 (client), replan 8, spend 7, job-state 7,
 comments 6, spend-refresh 4, handlers 4, job-title 4, integration 2.
