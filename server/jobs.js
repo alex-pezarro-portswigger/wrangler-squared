@@ -46,12 +46,15 @@ export function spendFor(host) {
 // TODO(host-api sessions:read status): drop once the projection carries it.
 // `dormant` is the graph's flag for a card with no live pane, which reads as
 // idle by status alone; a parked run's mail must wake one first.
+// An idle card still running a background shell is waiting on it, not finished,
+// so it reads as working: otherwise a step that runs a long command in the
+// background is reaped as receipt-less once IDLE_RECEIPT_GRACE_MS passes.
 const lastStatus = new Map();
 const dormant = new Set();
 export function noteGraph(graph) {
   lastStatus.clear(); dormant.clear();
   for (const s of graph?.sessions || []) {
-    lastStatus.set(s.sessionId, s.status ?? null);
+    lastStatus.set(s.sessionId, s.status === 'idle' && s.hasBackgroundShell ? 'working' : s.status ?? null);
     if (s.dormant) dormant.add(s.sessionId);
   }
 }

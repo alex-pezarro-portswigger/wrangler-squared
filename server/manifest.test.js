@@ -265,6 +265,17 @@ test('the graph contributor carries jobs under its own key and stamps live runs 
   assert.equal(statusOf(spawned[0].sessionId), 'needs-you', 'the runner reads the same cache');
 });
 
+test('an idle card with a background shell running reads as working to the runner', () => {
+  _resetForTests();
+  const { host } = fakeHost();
+  manifest.graph({ host, graph: { sessions: [
+    { sessionId: 'waiting', status: 'idle', hasBackgroundShell: true },
+    { sessionId: 'done', status: 'idle', hasBackgroundShell: false },
+  ] } });
+  assert.equal(statusOf('waiting'), 'working', 'not reaped as receipt-less while its background job runs');
+  assert.equal(statusOf('done'), 'idle');
+});
+
 test('the graph contributor prices a job off the host\'s usage rows, one refresh behind and never awaited', async () => {
   _resetForTests();
   const { host, spawned, usage } = fakeHost();
