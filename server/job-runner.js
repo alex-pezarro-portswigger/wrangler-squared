@@ -14,6 +14,20 @@ import { holdsRunning, dueTeardown, runningOf, sameItem, stopReason, teardown, i
 const shortError = (e) => String(e?.message || e).split('\n')[0].slice(0, 240);
 const BRANCH_UPDATE_BACKOFF_MS = 120000;
 const MAX_BRANCH_UPDATES = 3;
+// A failed post-merge run is red but still watched, more slowly: a re-run that
+// passes, or a later run containing the merge that does, clears it and the
+// sub-job climbs on as a green one would, with nobody pressing Retry. Read from
+// the error, not the last result: a re-run in flight reads pending meanwhile.
+// The watch backs off with the red's age (`redSince`) and ends after
+// RED_WATCH_MS, so one nobody acts on stops costing GitHub calls; Retry clears
+// the error, and the next failing poll stamps a fresh `redSince`.
+const POST_MERGE_FAILED = 'Post-merge run failed';
+const RED_POLL_MS = [[30 * 60000, 120000], [2 * 3600000, 300000], [Infinity, 900000]];
+const RED_WATCH_MS = 6 * 3600000;
+const redAge = (sub, now) => sub.error?.startsWith(POST_MERGE_FAILED) && sub.redSince ? now - sub.redSince : 0;
+const redPollMs = (sub, now) => RED_POLL_MS.find(([upTo]) => redAge(sub, now) < upTo)[1];
+const postMergeRed = (sub, now) => sub.stage === 'deployment' && !sub.recoveredBy && !!sub.error?.startsWith(POST_MERGE_FAILED)
+  && redAge(sub, now) < RED_WATCH_MS;
 export const acceptedRedLine = (sub) => `Post-merge run accepted red${sub.acceptedRed?.note ? `: ${sub.acceptedRed.note}` : ''}`;
 // Which red step a planning run was sent after: counted against that step's tries.
 const redStamp = (job) => job.replan?.red && !job.replan.red.human ? { red: { sub: job.replan.red.sub } } : undefined;
@@ -276,7 +290,7 @@ export class JobRunner {
       if (!this.allowed(id) || job.error) return;
       let sub = job.subJobs.find((s) => s.id === initial.id);
       if (activeFor(job, sub)) continue;
-      if (sub.error) continue;
+      if (sub.error && !postMergeRed(sub, this.now())) continue;
       try {
         if (sub.stage === 'session') {
           // A session starts once its milestone (`on`) and its prerequisites
@@ -373,7 +387,7 @@ export class JobRunner {
           const result = await this.github.deployment(sub);
           const staleMs = this.store.data.settings.deploymentStaleMinutes * 60000;
           this.patchSub(id, sub.id, (s) => {
-            s.deploymentResult = result; s.observationError = null; s.nextPollAt = this.now() + 30000;
+            s.deploymentResult = result; s.observationError = null; s.nextPollAt = this.now() + (result.status === 'failing' || s.error ? redPollMs(s, this.now()) : 30000);
             // NOTHING running this long after the merge means the workflows said
             // this push deploys and GitHub disagrees — nothing triggered, or
             // everything that did was skipped, or a cancelled run that no later
@@ -397,11 +411,15 @@ export class JobRunner {
           // says which colour it was.
           const accepted = result.status === 'failing' && !!sub.acceptedRed && sub.acceptedRed.ref === sub.pr?.mergeCommit;
           if (result.status === 'passing' || accepted) {
+            if (sub.error) { this.patchSub(id, sub.id, (s) => { s.error = null; s.blocked = null; s.redSince = null; }); job = this.store.get(id); sub = job.subJobs.find((s) => s.id === sub.id); }
             if (sub.check) await this.launch(job, sub, 'verify');
             else this.patchSub(id, sub.id, (s) => { s.deployed = { at: this.now(), checks: [accepted ? acceptedRedLine(s) : 'Post-merge runs passed'], commit: s.pr?.mergeCommit }; s.stage = 'cleanup'; s.state = 'queued'; });
           } else if (result.status === 'failing') {
             const failed = result.runs.filter((r) => r.status === 'failing').map((r) => r.workflow).join(', ');
-            this.patchSub(id, sub.id, (s) => { s.error = `Post-merge run failed: ${failed || 'unknown workflow'}`; });
+            this.patchSub(id, sub.id, (s) => {
+              if (!s.error?.startsWith(POST_MERGE_FAILED) || !s.redSince) s.redSince = this.now();
+              s.error = `${POST_MERGE_FAILED}: ${failed || 'unknown workflow'}`;
+            });
           }
         } else if (sub.stage === 'cleanup') {
           const { main } = (await this.runtime.cleanup(job, sub, { updateMain: settingsSchema.parse(this.store.data.settings ?? {}).updateMain })) || {};
