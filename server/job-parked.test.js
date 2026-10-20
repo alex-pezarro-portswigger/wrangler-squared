@@ -10,7 +10,7 @@ import { changeView } from './job-change.js';
 import { ensureInbox, roundDir, ideasDir } from './job-evidence.js';
 import { workingTreeHash } from './git.js';
 import { threadMail, jobPrompt } from './job-prompts.js';
-import { jobActionHandler } from './handlers.js';
+import { jobActionHandler, jobImagesHandler } from './handlers.js';
 import { _resetForTests, runnerFor } from './jobs.js';
 import { looksLikeQuestion } from './job-parked.js';
 
@@ -271,6 +271,26 @@ test('pasted images go to the evidence folder and the session is mailed their pa
   assert.deepEqual(Object.keys(host.kept), [], 'the kept copy is released once it is beside the round');
   const text = threadMail(f.store.get(f.job.id), f.run(), f.sub(), [m]);
   assert.ok(text.includes(path.join(roundDir(f.job.id, 'api', 1), m.images[0].file)));
+});
+
+test('a step\'s ideas are kept in the human\'s own words beside the plan change, pictures and all, until it is approved', async (t) => {
+  const f = fixture(t); await f.start(); await f.ready();
+  const host = hostFor(t, f, { 'pasted.png': { mime: 'image/png', bytes: PNG } });
+  const ask = async (text, images) => { const view = changeView(f.store.get(f.job.id), f.sub()); await jobActionHandler.handler({ id: f.job.id, subJobId: 'api', action: 'request-change', at: view.at, ref: view.ref, text, images }, host); };
+  await ask('  Make this a dropdown ', ['pasted.png']);
+  let { replan } = f.store.get(f.job.id);
+  assert.match(replan.feedback, /^About “Audit page”/, 'the planner reads the merged prompt');
+  const [a] = replan.asks;
+  assert.deepEqual([a.sub, a.text, a.images.length, a.images[0].round, typeof a.at], ['api', 'Make this a dropdown', 1, 1, 'number'], 'the dialog reads what was typed');
+  assert.equal(a.images[0].path, undefined, 'no server path rides to the board');
+  jobImagesHandler.handler({ id: f.job.id }, host);
+  assert.deepEqual(host.broadcasts.at(-1).images.map((i) => [i.name, i.mime]), [[`ask:${a.images[0].file}`, 'image/png']], 'its picture rides the job-images frame');
+  await ask('Also sort it');
+  ({ replan } = f.store.get(f.job.id));
+  assert.deepEqual(replan.asks.map((x) => x.text), ['Make this a dropdown', 'Also sort it'], 'a second idea adds to the first');
+  assert.match(replan.feedback, /^Earlier: .*\n\nNow: /s);
+  await f.propose([{ type: 'forward', sub: 'api', note: 'Make this a dropdown. Also sort it' }]);
+  assert.deepEqual(f.store.get(f.job.id).replan ?? null, null, 'gone with the plan change it went into');
 });
 
 test('an image that cannot be kept refuses the idea out loud, so nothing the human saw is quietly dropped', async (t) => {

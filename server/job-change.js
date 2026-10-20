@@ -38,16 +38,18 @@ export function requestChange(job, sub, { at, ref, text, attachments, from }, { 
   // go on into its session's thread when the planner forwards the idea there.
   const source = sub ? { sub: sub.id, at: view.at, ref: view.ref } : null;
   const images = files.map(({ file, mime, path }) => ({ sub: sub?.id || null, round: view.at === 'code' ? sub.ready.round || 1 : null, file, mime, path }));
+  // What the step's dialog draws back: the words as typed, not the prompt they ride in.
+  const ask = sub ? { sub: sub.id, text: typed, images: images.map(({ file, mime, round }) => ({ file, mime, round })), ...(from === 'helper' ? { from } : {}) } : null;
   // A declared red is the planner's: it has already tried, so the idea goes to it
   // with everything it found, and still holds only that step.
   if (sub && isDeclared(job, sub)) {
     const d = sub.red.declared;
-    requestReplan(job, `About ${quoted(sub.title)} (${sub.id}), which was declared red: ${d.summary}${d.tried?.length ? `\nTried: ${d.tried.join(' | ')}` : ''}${d.ask ? `\nThe decision asked of the human: ${d.ask}` : ''}\nThe human says: ${idea}`, now, { sub: sub.id, auto: false, human: true }, { source, images });
+    requestReplan(job, `About ${quoted(sub.title)} (${sub.id}), which was declared red: ${d.summary}${d.tried?.length ? `\nTried: ${d.tried.join(' | ')}` : ''}${d.ask ? `\nThe decision asked of the human: ${d.ask}` : ''}\nThe human says: ${idea}`, now, { sub: sub.id, auto: false, human: true }, { source, images, ask });
     return { detail: `${from === 'helper' ? 'A helper session sent' : 'Sent'} the declared red on ${quoted(sub.title)} back to the planner`, route: 'planner' };
   }
   // Anything else is a change of plan on a running job, even a word for one
   // step's open session: the planner proposes, the human approves. A step's idea
   // says where it came from.
-  requestReplan(job, sub ? `About ${quoted(sub.title)} (${sub.id}, ${sub.stage}${sub.state ? `/${sub.state}` : ''}): ${idea}` : idea, now, null, { source, images });
+  requestReplan(job, sub ? `About ${quoted(sub.title)} (${sub.id}, ${sub.stage}${sub.state ? `/${sub.state}` : ''}): ${idea}` : idea, now, null, { source, images, ask });
   return { detail: sub ? `${from === 'helper' ? 'A helper session sent' : 'Sent'} the planner an idea about ${quoted(sub.title)}` : 'Asked the planner to change the plan', route: 'planner' };
 }

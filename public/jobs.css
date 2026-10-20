@@ -1676,6 +1676,12 @@ body.light .job-dialog:not([data-scheme="dark"]) :is(.job-pick,.pick-cabinet) { 
 .job-idea-orb::after { content:""; position:absolute; inset:-30%; border-radius:50%; background:conic-gradient(from 0deg, transparent 0 30%, rgba(255,210,192,.45) 42%, transparent 55% 80%, rgba(47,196,192,.35) 90%, transparent); animation:gx-spin 9s linear infinite; mix-blend-mode:screen; }
 .job-idea-orb.small { width:18px; height:18px; }
 .job-idea-thread { flex:1; display:grid; align-content:start; gap:18px; padding:22px 26px 8px; }
+.job-asks { display:grid; gap:8px; margin:8px 0 4px; }
+.job-asks .job-sent { margin:0; }
+.job-asks .job-idea-thinking { justify-self:end; }
+.job-asks-ready { justify-self:end; display:inline-flex; align-items:center; gap:8px; font-size:12px; color:var(--fg-muted); }
+.job-asks-ready > .icon { width:13px; height:13px; color:var(--green-fg); }
+.job-asks-ready button { display:inline-flex; align-items:center; gap:5px; padding:4px 9px; font-size:12px; }
 .job-idea-thread .job-sent { margin:0; }
 .job-idea-thread .job-sent-bubble { max-width:min(86%,560px); }
 .job-idea-msg { display:grid; grid-template-columns:30px minmax(0,1fr); gap:12px; max-width:720px; }

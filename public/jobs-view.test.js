@@ -2714,6 +2714,36 @@ test('the sent moment: the idea lifts into a bubble that says sending, ticks to 
   assert.equal(sent(), null, 'a fresh look starts clean');
 });
 
+test('a step\'s idea is drawn from the job while the planner works on it, so closing the dialog or reloading keeps it, and it points to the proposal once one waits', (t) => {
+  const f = fixture(t); const job = f.data.jobs[0]; job.stage = 'active';
+  job.subJobs = [{ ...sub('api'), stage: 'pr', state: 'watching', pr: { url: 'https://github.com/org/repo/pull/1', head: 'h1', checkStatus: 'passing', checks: [] } }, sub('web')];
+  f.view.update(f.data); f.q('.job-plate-graph [data-sub="api"]').dispatchEvent(f.event('click'));
+  const text = f.q('.job-change textarea'); text.value = 'Pin the client to v3'; text.dispatchEvent(f.event('input')); f.q('[data-change-send]').click();
+  f.view.created({ event: 'job-action-complete', jobId: 'job1', subJobId: 'api', action: 'request-change' });
+  job.replan = { feedback: 'About “Deliver api” (api, pr/watching): Pin the client to v3', at: Date.now(), proposal: null, previous: null, source: { sub: 'api', at: 'pr', ref: 'h1' },
+    asks: [{ sub: 'api', text: 'Pin the client to v3', at: Date.now(), images: [{ file: 'ask-k1-1.png', mime: 'image/png', round: null }] }] };
+  f.view.update(f.data);
+  const bubbles = () => [...document.querySelectorAll('#job-dialog .job-sent-bubble')].map((b) => b.textContent);
+  assert.deepEqual(bubbles(), ['1Pin the client to v3'], 'the kept idea replaces the bubble of the moment: drawn once');
+  f.q('#job-dialog').close();
+  f.view.openDetail('job1', 'api');
+  assert.deepEqual(bubbles(), ['1Pin the client to v3'], 'back again: your words, as typed, not the planner\'s prompt');
+  assert.match(f.q('#job-dialog .job-asks .job-idea-thinking').textContent, /Planner is working on it…/);
+  assert.equal(f.q('#job-dialog .job-asks [data-image]').dataset.image, 'ask:ask-k1-1.png', 'its picture is filled from a job-images frame');
+  assert.equal(f.q('#job-dialog .job-change textarea'), null, 'no box while the planner draws its proposal');
+  f.view.openDetail('job1', 'web');
+  assert.equal(f.q('#job-dialog .job-asks'), null, 'only on the step it was typed on');
+  f.view.openDetail('job1', 'api');
+  job.replan.proposal = { id: 'run_p', plan: job.plan, merged: job.plan, changes: { frozen: [], kept: ['api', 'web'], edited: [], added: [], removed: [] }, actions: [], alternatives: [] };
+  f.view.update(f.data);
+  assert.equal(f.q('#job-dialog .job-asks .job-idea-thinking'), null);
+  assert.match(f.q('#job-dialog .job-asks-ready').textContent, /The planner has proposed a change for this/);
+  f.q('#job-dialog .job-asks-ready [data-open-job]').click();
+  assert.match(f.q('#job-dialog').textContent, /Approve change/, 'it opens the job on the proposal');
+  job.replan = null; f.view.update(f.data); f.view.openDetail('job1', 'api');
+  assert.equal(f.q('#job-dialog .job-asks'), null, 'approved or discarded, the idea is the planner\'s history');
+});
+
 // ---- Red steps (server/job-red.js): Fixing is Wrangler's, Declared red is yours ----
 const fixtureWithRed = (t) => fixture(t);
 const redRef = (job, s) => `${s.error || ''}|${s.pr?.head || ''}|${s.pr?.mergeCommit || ''}|${job.runs.filter((r) => r.subJobId === s.id).length}`;

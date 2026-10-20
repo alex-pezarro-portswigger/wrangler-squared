@@ -118,9 +118,12 @@ export function mergeReplan(job, proposal) {
 // plan and its actions) as what the human just asked it to change, and the ideas
 // add up, so a later one never drops an earlier one. `source` is the step and view
 // the latest idea was typed on (job-actions.js holds the step's actions to it);
-// `images` are every idea's pictures, for a forward to carry into a thread.
+// `images` are every idea's pictures, for a forward to carry into a thread. `ask`
+// is a step's idea in the human's own words (the feedback is the planner's merged
+// prompt): its dialog draws `asks` until the replan is approved or discarded.
 export const REPLAN_FEEDBACK_MAX = 16000;
-export function requestReplan(job, feedback, now, red = null, { source = null, images = [] } = {}) {
+export const REPLAN_ASKS_MAX = 20;
+export function requestReplan(job, feedback, now, red = null, { source = null, images = [], ask = null } = {}) {
   if (job.stage !== 'active') throw new Error('Only a running job has a plan to change');
   if (job.runs.some((r) => !r.stopped && !r.subJobId)) throw new Error('Wait for the planning step to finish');
   const text = String(feedback || '').trim().slice(0, 8000);
@@ -133,6 +136,7 @@ export function requestReplan(job, feedback, now, red = null, { source = null, i
     ...(actions.length ? { previousActions: actions } : prev?.proposal ? {} : prev?.previousActions ? { previousActions: prev.previousActions } : {}),
     ...(source || prev?.source ? { source: source || prev.source } : {}),
     ...(images.length || prev?.images?.length ? { images: [...(prev?.images || []), ...images] } : {}),
+    ...(ask || prev?.asks?.length ? { asks: [...(prev?.asks || []), ...(ask ? [{ ...ask, at: now }] : [])].slice(-REPLAN_ASKS_MAX) } : {}),
     ...(red ? { red } : prev?.red ? { red: { ...prev.red, auto: false, human: true } } : {}) };
 }
 

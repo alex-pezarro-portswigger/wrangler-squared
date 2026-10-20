@@ -847,9 +847,10 @@ export function initJobsView({ send, stageImage, frameOf = sourceToFrame, getAge
   // What was sent, above the box it came from: the words and pictures lift into a
   // bubble, and the line under it says who has it once the server took it. Once the
   // conversation shows the message itself, its row there is the receipt instead.
-  function askSentHtml(sub) {
+  function askSentHtml(job, sub) {
     if (!askSent || askSent.subId !== (sub?.id ?? null)) return '';
-    if (askSent.state === 'sent' && sub?.thread?.some((m) => m.from === 'human' && m.text === askSent.text && m.at >= askSent.at - 60000)) return '';
+    const held = (m) => m.text === askSent.text && m.at >= askSent.at - 60000;
+    if (askSent.state === 'sent' && (sub?.thread?.some((m) => m.from === 'human' && held(m)) || subAsks(job, sub).some(held))) return '';
     const s = askSent, fresh = s.drawn !== s.state; s.drawn = s.state;
     const pics = s.images.length ? `<span class="job-sent-imgs">${s.images.map((u) => `<img src="${esc(u)}" alt="">`).join('')}</span>` : '';
     const n = s.images.length ? ` with ${s.images.length} image${s.images.length > 1 ? 's' : ''}` : '';
@@ -858,13 +859,26 @@ export function initJobsView({ send, stageImage, frameOf = sourceToFrame, getAge
       : `<span class="job-sent-meta"><span class="job-sent-sending">Sending to ${esc(s.to.toLowerCase())}…</span></span>`;
     return `<div class="job-sent ${s.state}${fresh ? ' fresh' : ''}" data-sent-state="${s.state}"><div class="job-sent-bubble">${pics}<span>${esc(s.text)}</span></div>${meta}</div>`;
   }
+  // A step's ideas as the human typed them, kept on the plan change they went into
+  // (server/job-replan.js `asks`), so they outlive this dialog and a reload: under
+  // them, the planner at work, or where its proposal waits.
+  const subAsks = (job, sub) => (sub && replanPending(job) ? (job.replan.asks || []).filter((a) => a.sub === sub.id) : []);
+  function asksHtml(job, sub) {
+    const asks = subAsks(job, sub);
+    if (!asks.length) return '';
+    const rows = asks.map((a) => `<div class="job-sent"><div class="job-sent-bubble">${imageStripHtml(job, (a.images || []).map((i) => `ask:${i.file}`), 'job-sent-strip')}<span>${esc(a.text)}</span></div><span class="job-sent-meta">${a.from === 'helper' ? 'Your helper' : 'You'} · ${esc(new Date(a.at).toLocaleTimeString(undefined, { timeStyle: 'short' }))}</span></div>`);
+    const status = job.replan.proposal
+      ? `<div class="job-asks-ready">${ICONS.check}<span>The planner has proposed a change for this</span><button type="button" data-open-job title="Opens the job dialog on the proposal">${ICONS.eye}Review proposal</button></div>`
+      : `<div class="job-idea-thinking"><span class="job-idea-orb small" aria-hidden="true"></span><span class="job-idea-shine">Planner is working on it…</span></div>`;
+    return `<div class="job-asks" aria-live="polite">${rows.join('')}${status}</div>`;
+  }
   // The one box an idea goes in through, on every step, review and proposal. It is
   // pinned to the thing in view (`at`, `ref`, read when this was drawn): the server
   // refuses it if that has since changed. Not a <form>, so a tick's redraw is held
   // back only while something is typed (renderBoards), never by the box's presence.
   // At rest it is one line naming who hears it; focus, words or a picture open it.
   function changeBoxHtml(job, sub) {
-    const view = changeView(job, sub), sent = askSentHtml(sub);
+    const view = changeView(job, sub), sent = asksHtml(job, sub) + askSentHtml(job, sub);
     // Every idea goes to the planner: while it is drawing a proposal it takes no
     // other, and once one waits any box adds to it. A step Wrangler is fixing is
     // the planner's for now.

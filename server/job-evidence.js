@@ -121,6 +121,18 @@ export function readIdeaImage({ jobId, file }) {
   } catch { return null; }
 }
 
+// A picture sent with a step's idea, wherever keepAskImages put it: its round's
+// folder, or the step's ideas folder when no round held it.
+export function readAskImage({ jobId, subId, round, file }) {
+  if (round != null) return readEvidence({ jobId, subId, round, file });
+  if (!evidenceName(file)) return null;
+  try {
+    const bytes = fs.readFileSync(path.join(ideasDir(jobId, subId), file));
+    const kind = sniffKind(bytes);
+    return kind ? { mime: kind.mime, bytes } : null;
+  } catch { return null; }
+}
+
 export function readEvidence({ jobId, subId, round, file }) {
   if (!evidenceName(file) || !Number.isInteger(round) || round < 1) return null;
   try {

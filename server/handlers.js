@@ -3,7 +3,7 @@ import { access as defaultAccess } from 'node:fs/promises';
 import { kick, makeCreateJob } from './job-create.js';
 import { settingsSchema } from './jobs-schema.js';
 import { runFile } from './job-github.js';
-import { thumbnailOf, readEvidence, keepAskImages, readIdeaImage } from './job-evidence.js';
+import { thumbnailOf, readEvidence, keepAskImages, readIdeaImage, readAskImage } from './job-evidence.js';
 import { workingTreeHash } from './git.js';
 import { TREE_MOVED } from './job-store.js';
 import { readLog } from './job-running.js';
@@ -132,7 +132,8 @@ export const jobOpenIdeHandler = makeOpenIdeHandler();
 // store (`images:keep`) and nothing serves that store to a browser, so the bytes
 // ride the one outbound channel there is. Asked once per job per dialog, and a
 // name the store has lost is simply absent. Pictures pasted into a New idea's
-// conversation ride along as `idea:<file>`.
+// conversation ride along as `idea:<file>`, and those sent with a step's idea
+// while a plan change waits as `ask:<file>`.
 export const jobImagesHandler = {
   type: 'job-images',
   handler(msg, host) {
@@ -144,6 +145,10 @@ export const jobImagesHandler = {
     for (const { file } of (job?.idea?.thread || []).flatMap((m) => m.images || [])) {
       const got = readIdeaImage({ jobId: job.id, file });
       if (got) images.push({ name: `idea:${file}`, mime: got.mime, dataBase64: got.bytes.toString('base64') });
+    }
+    for (const a of job?.replan?.asks || []) for (const { file, round } of a.images || []) {
+      const got = readAskImage({ jobId: job.id, subId: a.sub, round, file });
+      if (got) images.push({ name: `ask:${file}`, mime: got.mime, dataBase64: Buffer.from(got.bytes).toString('base64') });
     }
     host.broadcast({ event: 'job-images', jobId: msg.id, images });
   },
