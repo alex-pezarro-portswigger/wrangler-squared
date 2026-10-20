@@ -1,3 +1,4 @@
+import { inboxDir } from './job-evidence.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import manifest from './manifest.js';
@@ -20,9 +21,11 @@ test('the manifest declares what package.json disclosed, and only known hook nam
   assert.deepEqual([...manifest.requires].sort(), [...declared.requires].sort(), 'the manifest may not be wider than what the human consented to');
   assert.ok(manifest.requires.includes('tasks:read'));
   assert.ok(manifest.requires.includes('tasks:write'));
-  assert.equal(manifest.engines.wranglerApi, '^1.31.0', 'images:keep and the spawn images option arrived in 1.31');
+  assert.equal(manifest.engines.wranglerApi, '^1.38.0', 'files:view and the client api.files arrived in 1.38');
   assert.ok(manifest.requires.includes('images:keep'));
-  assert.deepEqual(manifest.tools.map((t) => t.name), ['job_report', 'get_job_context', 'create_job']);
+  assert.ok(manifest.requires.includes('files:view'));
+  assert.ok(declared.requires.includes('files:view'));
+  assert.deepEqual(manifest.tools.map((t) => t.name), ['job_report', 'get_job_context', 'create_job', 'send_step_idea']);
   assert.deepEqual(Object.keys(manifest.session), ['onBeforeDispatch']);
   assert.equal(manifest.client, 'public/index.js');
   assert.equal(manifest.styles, 'public/jobs.css');
@@ -58,12 +61,12 @@ test('a job created without review flags takes the saved review defaults; a flag
   runnerFor(host).tick = async () => {};
   assert.deepEqual(settingsSchema.parse({}).reviewDefaults, REVIEW_DEFAULTS, 'settings saved before the key parse to the original form');
   await tool('create_job').handler({ host, caller: 'sid' }, { ...newJob, start: false });
-  await handler('job-settings').handler({ patch: { reviewDefaults: { reviewPlan: false, reviewCode: true, reviewMerge: false, reviewSessions: true, reviewWrites: true } } }, host);
+  await handler('job-settings').handler({ patch: { reviewDefaults: { reviewPlan: false, reviewCode: true, reviewMerge: false, reviewSessions: true, reviewWrites: true, reviewRed: false } } }, host);
   await tool('create_job').handler({ host, caller: 'sid' }, { ...newJob, start: false });
   await tool('create_job').handler({ host, caller: 'sid' }, { ...newJob, reviewPlan: true, reviewWrites: false, start: false });
   const flags = (j) => Object.keys(REVIEW_DEFAULTS).map((f) => j[f]);
   assert.deepEqual(host.stores.jobs.snapshot().jobs.map(flags), [
-    [true, true, true, true, false], [false, true, false, true, true], [true, true, false, true, false],
+    [true, true, true, true, false, true], [false, true, false, true, true, false], [true, true, false, true, false, false],
   ]);
 });
 
@@ -264,6 +267,17 @@ test('the graph contributor carries jobs under its own key and stamps live runs 
   assert.equal(statusOf(spawned[0].sessionId), 'needs-you', 'the runner reads the same cache');
 });
 
+test('an idle card with a background shell running reads as working to the runner', () => {
+  _resetForTests();
+  const { host } = fakeHost();
+  manifest.graph({ host, graph: { sessions: [
+    { sessionId: 'waiting', status: 'idle', hasBackgroundShell: true },
+    { sessionId: 'done', status: 'idle', hasBackgroundShell: false },
+  ] } });
+  assert.equal(statusOf('waiting'), 'working', 'not reaped as receipt-less while its background job runs');
+  assert.equal(statusOf('done'), 'idle');
+});
+
 test('the graph contributor prices a job off the host\'s usage rows, one refresh behind and never awaited', async () => {
   _resetForTests();
   const { host, spawned, usage } = fakeHost();
@@ -319,7 +333,7 @@ test('a PR launch has the wrangler cut the worktree and keeps core off the job P
   const opts = spawned[0];
   assert.equal(opts.cwd, '/repos/thing', 'the wrangler branches from the main checkout');
   assert.deepEqual(opts.worktree, { branch: placeholderBranch(job, sub), base: 'refs/remotes/origin/main', auto: true });
-  assert.equal(opts.addDirs, undefined, 'only planning gets the repos parent');
+  assert.deepEqual(opts.addDirs, [inboxDir(job.id, sub.id)], 'only planning gets the repos parent; an implementation run gets its proof inbox');
   assert.equal(opts.taskId, 'task_7');
   assert.deepEqual([opts.model, opts.effort], ['opus', 'high']);
   assert.deepEqual([opts.autoMergeOnPass, opts.autoFixPrChecks], [false, false], 'the runner drives this PR');

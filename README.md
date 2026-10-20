@@ -1,7 +1,9 @@
 # Wrangler²
 
-The Agent Wrangler **automated jobs** system as an installable
-[extension](https://github.com/PortSwigger/agent-wrangler).
+**A new way of working with AI.** Wrangler² breaks work into AI sessions and PRs,
+provides proof that changes work, and allows you to get more done in parallel. It
+installs as an [extension](https://github.com/PortSwigger/agent-wrangler) for
+Agent Wrangler.
 
 A job starts from an outcome. A planning session turns it into an ordered set of
 PRs (and, where a step is not a repository change, an agent session on this
@@ -11,8 +13,8 @@ that has no ticket gets no story and never waits for one. Each step runs as its 
 a dedicated worktree, submits a `job_report` receipt and stops; the wrangler
 watches the PR, drives CI repairs, merges when the gates are satisfied, watches
 the post-merge runs and cleans up. Humans decide at the review points — plan,
-code, merge — and make the seven **moves** when something goes wrong; agents
-never change the plan.
+code, merge — and send an idea in through **Request changes** on any step
+when something goes wrong; agents never change the plan.
 
 A Codex job also saves a **sandbox** mode, chosen in the New job form's Sandbox
 section and applied to every step through the manifest's `codexPolicy` hook
@@ -42,10 +44,10 @@ see the tool, so a job cannot start further jobs.
 
 ## Status
 
-Functionally complete against host API **1.31.0**: 1.4 added the worktree,
+Functionally complete against host API **1.38.0**: 1.4 added the worktree,
 `addDirs`, `taskId` and PR-automation spawn options this extension depends on,
 1.6 the `usage:read` and `sessions:bill` capabilities behind the per-job price,
-1.7 the `view` badge that puts the needs-you count on the rail button, 1.8 the client `api.openSession` the Jobs view opens a step's card with, 1.12 the `codexPolicy` hook behind a Codex job's sandbox mode, 1.25 the client `api.agents()` the New job form reads its models and efforts from, 1.27 the client `api.openDiff` behind Review code in Wrangler, and 1.31 the `images:keep` capability and `images` spawn option behind a job's attached images. Every feature the in-core system had is either wired
+1.7 the `view` badge that puts the needs-you count on the rail button, 1.8 the client `api.openSession` the Jobs view opens a step's card with, 1.12 the `codexPolicy` hook behind a Codex job's sandbox mode, 1.25 the client `api.agents()` the New job form reads its models and efforts from, 1.27 the client `api.openDiff` behind Review code in Wrangler, and 1.31 the `images:keep` capability and `images` spawn option behind a job's attached images, and 1.38 the `files:view` capability and client `api.openFile` / `api.files` behind Open on a file place. Every feature the in-core system had is either wired
 through the extension `host` façade or is one of the open host-API gaps listed in
 **`docs/PORTING.md`**, which is the map: what came from where, what stands in
 for what, and which gap blocks which feature. `grep -rn 'TODO(host-api' server
@@ -53,7 +55,7 @@ public` is the live list of gaps.
 
 ## Install
 
-Requires an agent-wrangler on `main` (host API `^1.31.0`). In the wrangler's
+Requires an agent-wrangler on `main` (host API `^1.38.0`). In the wrangler's
 Extensions tab, install from this repository's git URL, consent to the
 capabilities disclosed in `package.json`'s `wranglerExtension` block, then
 restart the wrangler. The extension asks for `sessions:read`, `sessions:spawn`,

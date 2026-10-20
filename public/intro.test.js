@@ -45,27 +45,28 @@ test('a reader who has seen it is never shown it again, and with no storage it n
   assert.equal(p.q('#jobs-intro'), null, 'nothing could record the dismissal, so it would show on every load');
 });
 
-test('Next, Back and the stepper walk the steps; only the current one is readable and the last ends on New job', (t) => {
+test('Next, Back and the stepper walk the steps; only the current one is readable and the last ends on New idea', (t) => {
   const p = page(t);
   let started = 0;
   const storage = memoryStorage();
   createIntro({ storage, onNewJob: () => { started += 1; } }).open();
-  assert.deepEqual(INTRO_STEPS.map((s) => s.tab), ['Welcome', 'Jobs', 'New job', 'Sub-jobs', 'Needs you', 'Receipts', 'Reviews', 'Jira', 'Start']);
+  assert.deepEqual(INTRO_STEPS.map((s) => s.tab), ['Welcome', 'Jobs', 'New idea', 'Sub-jobs', 'Needs you', 'Receipts', 'See it working', 'Reviews', 'Writes', 'Start']);
   assert.equal(p.q('.intro-count').textContent, `1 of ${INTRO_STEPS.length}`);
   assert.ok(p.q('[data-intro="back"]').hidden, 'no Back on the first step');
+  assert.deepEqual([...document.querySelectorAll('.intro-actions button')].map((b) => b.dataset.intro), ['skip', 'back', 'next'], 'Skip, then Back, then Next last, so Tab follows the wizard layout');
   assert.equal(document.querySelectorAll('.intro-panel:not([inert])').length, 1, 'every step is laid out, one is live');
   p.click('[data-intro="next"]');
   assert.match(p.title(), /splits the work/);
   p.click('[data-intro="next"]');
   assert.match(p.title(), /plan you approve/);
-  assert.equal(p.q('[role="tab"][aria-selected="true"]').textContent, 'New job');
+  assert.equal(p.q('[role="tab"][aria-selected="true"]').textContent, 'New idea');
   p.click('[data-intro="back"]');
   p.click('[data-intro="back"]');
   assert.equal(p.title(), 'Welcome');
   p.click(`[data-go="${INTRO_STEPS.length - 1}"]`);
   assert.match(p.title(), /ready to start/);
   assert.ok(p.q('[data-intro="skip"]').hidden, 'no Skip on the last step');
-  assert.match(p.q('[data-intro="next"]').textContent, /New job/);
+  assert.match(p.q('[data-intro="next"]').textContent, /New idea/);
   assert.ok(p.q('[data-intro="next"]').classList.contains('tone-ok'));
   p.click('[data-intro="next"]');
   assert.equal(started, 1);
@@ -111,6 +112,11 @@ test('the Jobs step plays a mini board whose rail badge counts the amber rows', 
     assert.equal(el.querySelector('.intro-rail-badge').classList.contains('zero'), amber === 0);
   }
   assert.ok(frames(1).some((el) => el.querySelectorAll('.intro-mini-job.tone-warn').length === 2));
+  const idea = frames(1).map((el) => el.querySelector('.intro-mini-job'));
+  assert.deepEqual(idea.map((r) => r.querySelector('.gx.nb[data-inflow]')?.dataset.stage ?? null), ['0', '0', '1', '0', '2', null, null], 'an idea under its forming sky, brighter as the planner asks and suggests, then the job it became');
+  assert.deepEqual(idea.slice(0, 5).map((r) => r.querySelector('small').textContent), ['Idea · Planner is reading it', 'Idea · Planner is reading it', 'Idea · The planner asked you', 'Idea · Planner is reading it', 'Idea · Job suggested · review']);
+  assert.ok(idea[2].classList.contains('tone-warn'), 'a question waiting on you counts');
+  assert.equal(idea[5].querySelector('small').textContent, 'Starting its sub-jobs', 'creating the suggested job approved its plan');
   const before = fig().querySelector('.intro-figure').innerHTML;
   await new Promise((r) => p.window.setTimeout(r, 1650));
   assert.notEqual(fig().querySelector('.intro-figure').innerHTML, before, 'it advances by itself');
@@ -122,17 +128,18 @@ test('with reduced motion each live figure holds a finished frame and nothing ti
   createIntro({ storage: memoryStorage() }).open();
   const html = p.q('.intro-body').innerHTML;
   assert.match(p.q('.intro-goal').textContent, /Delivered/);
-  assert.equal(document.querySelectorAll('.intro-panel')[1].querySelector('.intro-rail-badge').textContent, '2');
+  assert.equal(document.querySelectorAll('.intro-panel')[1].querySelector('.intro-rail-badge').textContent, '3');
+  assert.ok(document.querySelectorAll('.intro-panel')[2].querySelector('.intro-chat-plan'), 'New idea holds on the job it started');
   await new Promise((r) => p.window.setTimeout(r, 1450));
   assert.equal(p.q('.intro-body').innerHTML, html);
 });
 
 test('the arrow keys step through, and the review checkpoints are a picture that switches in place', (t) => {
   const p = page(t);
-  createIntro({ storage: memoryStorage() }).open(6);
+  createIntro({ storage: memoryStorage() }).open(7);
   assert.match(p.title(), /stops for you\./);
   const row = () => p.q('.intro-checkpoint[data-checkpoint="reviewMerge"]');
-  assert.deepEqual([...p.window.document.querySelectorAll('.intro-checkpoint .job-review-name')].map((n) => n.firstChild.textContent), ['Plan', 'Code', 'Merge', 'Session results', 'Writes'], 'all five checkpoints, in the form’s words');
+  assert.deepEqual([...p.window.document.querySelectorAll('.intro-checkpoint .job-review-name')].map((n) => n.firstChild.textContent), ['Plan', 'Local verification', 'Merge', 'Session results', 'Writes', 'Red steps'], 'all six checkpoints, in the form’s words');
   const toggle = () => row().querySelector('input[role="switch"]');
   assert.equal(row().querySelectorAll('input').length, 1, 'one control flips the checkpoint');
   assert.equal(toggle().checked, false);
@@ -149,9 +156,69 @@ test('the arrow keys step through, and the review checkpoints are a picture that
   assert.equal(p.window.document.activeElement, toggle(), 'focus stays on the toggle');
   assert.equal(p.window.document.activeElement.form, null, 'the picture is no form’s field');
   p.q('#jobs-intro').dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
-  assert.match(p.title(), /Work with tickets/);
+  assert.match(p.title(), /kept up to date/);
   p.q('#jobs-intro').dispatchEvent(new p.window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
   assert.match(p.title(), /stops for you\./);
+});
+
+const step = (tab) => INTRO_STEPS.findIndex((s) => s.tab === tab);
+const still = (tab) => { const s = INTRO_STEPS[step(tab)]; const el = document.createElement('div'); el.innerHTML = s.figure({}, s.anim?.still ?? 0); return el; };
+
+test('New idea plays an idea, the planner’s question, the job it suggests, then the plan to approve, in the planner’s own markup', (t) => {
+  page(t);
+  const els = frames(step('New idea'));
+  const said = (el) => [...el.querySelectorAll('.job-sent-bubble, .job-idea-body, .job-idea-thinking, .job-launch-title')].map((n) => n.textContent.trim());
+  assert.deepEqual(said(els[0]), ['Add a dark mode to the reports dashboard', 'Planner is reading the idea…']);
+  assert.match(said(els[1]).at(-1), /follow the system setting/, 'then it asks');
+  assert.deepEqual(said(els[2]).slice(-2), ['Follow the system, with a switch to override it. Land it on next.', 'Planner is thinking…']);
+  assert.equal(els[3].querySelector('.job-launch.live .job-launch-title').textContent, 'Dark mode for the reports dashboard', 'and suggests a job');
+  assert.ok(els[4].querySelector('.job-launch.done'), 'Create job pressed');
+  assert.equal(els[3].querySelector('.intro-chat-plan'), null);
+  const plan = els.at(-1);
+  assert.equal(plan.querySelector('.job-idea-thinking'), null, 'the planner is done once the job is made');
+  assert.equal(plan.querySelector('.job-plan-branch').textContent, 'next');
+  assert.equal(plan.querySelector('.job-change textarea'), null, 'a one-row textarea would scroll the example');
+  assert.equal(plan.querySelector('.job-change-text').textContent, 'Design the switch first');
+  assert.deepEqual(els.map((el) => el.querySelector('.intro-flow .job-node:last-child .job-status').textContent), ['Next', 'Next', 'Next', 'Next', 'Working', 'Working', 'Working'], 'pressing the suggestion starts the job: no Approve after it');
+  for (const el of els) assert.ok(el.querySelector('.intro-chat').hasAttribute('inert'), 'its buttons do nothing here, so nobody can reach them');
+  assert.equal(INTRO_STEPS[step('New idea')].anim.still, els.length - 2, 'reduced motion holds on the plan');
+});
+
+test('the last step’s checklist says an idea is talked through before its plan', (t) => {
+  const p = page(t);
+  createIntro({ storage: memoryStorage() }).open(INTRO_STEPS.length - 1);
+  const items = [...p.q('.intro-panel:not([inert]) .intro-done').querySelectorAll('li')].map((li) => li.textContent);
+  assert.ok(items.includes('New idea: talk it through with the planner, then approve the plan'));
+});
+
+test('Sub-jobs draws three kinds and the places a session writes to; Jira is a place, not a kind', (t) => {
+  page(t);
+  const el = still('Sub-jobs');
+  assert.deepEqual([...el.querySelectorAll('.intro-kind')].map((k) => k.textContent), ['PR', 'Session', 'Human']);
+  assert.deepEqual([...el.querySelectorAll('.job-place-chip b')].map((b) => b.textContent), ['Jira', 'Slack', 'Confluence', 'Artifact', 'File', 'Web page']);
+});
+
+test('Needs you plays a red step that Wrangler fixes uncounted, then a fix that waits on you', (t) => {
+  page(t);
+  const seen = frames(step('Needs you')).map((el) => [el.querySelector('.job-status').textContent, el.querySelector('.intro-count-pill').textContent]);
+  assert.deepEqual(seen.slice(0, 3), [['Ready for your review', '2'], ['Checks failing', '2'], ['Fixing · try 1 of 2', '1']], 'fixing is not counted');
+  assert.deepEqual(seen.at(-1), ['Fix ready · Review fix', '2']);
+});
+
+test('See it working fills the Show me checklist from the board’s own markup, then leaves the preview running, all inert', (t) => {
+  page(t);
+  const els = frames(step('See it working'));
+  assert.deepEqual(els.map((el) => el.querySelectorAll('.job-proof-item:not(.wn-pending)').length), [0, 1, 2, 3, 3, 3]);
+  assert.deepEqual(els.map((el) => el.querySelector('.job-proof-verdict b').textContent), ['0 of 3 checked', '1 of 3 checked', '2 of 3 checked', '3 of 3 checked', '3 of 3 checked', '3 of 3 checked']);
+  assert.equal(els[2].querySelector('.job-run-pop'), null, 'nothing is running until the proof is in');
+  assert.equal(els.at(-1).querySelector('.job-run-chip').textContent.trim(), '2 running');
+  assert.ok(els.at(-1).querySelector('.intro-inert').hasAttribute('inert'), 'its buttons and link do nothing here, so nobody can reach them');
+});
+
+test('Writes ends with a receipt for every write, one of them already done', (t) => {
+  page(t);
+  const lines = [...still('Writes').querySelectorAll('.intro-jira-row small')].map((n) => n.textContent);
+  assert.deepEqual(lines, ['Written Claude artifact ↗', 'Written WEB-214 ↗', 'Already done', 'Written #team-web ↗']);
 });
 
 test('reopens from the Jobs header and from Automation settings', (t) => {
@@ -170,8 +237,8 @@ test('reopens from the Jobs header and from Automation settings', (t) => {
 
 // The real client module, registered the way slots.js does with the registrar's
 // own `api` (host api 1.14): the intro shows on load, before the Jobs view has
-// ever been mounted, and its New job switches to the view and opens the form.
-test('the client shows the intro on load to an unseen reader and its New job lands on the Jobs form', (t) => {
+// ever been mounted, and its New idea switches to the view and opens the form.
+test('the client shows the intro on load to an unseen reader and its New idea lands on the Jobs form', (t) => {
   const p = page(t);
   const storage = memoryStorage();
   const contributions = [];
@@ -184,7 +251,7 @@ test('the client shows the intro on load to an unseen reader and its New job lan
   const el = document.createElement('div');
   document.body.appendChild(el);
   contributions[0].mount(el, { send: () => {}, agents: () => [{ id: 'claude', label: 'Claude', models: [], efforts: [] }], storage });
-  assert.ok(p.q('#job-create-form'), 'the New job form opens once the view mounts');
+  assert.ok(p.q('#job-create-form'), 'the New idea form opens once the view mounts');
   p.click('#jobs-intro-open');
   assert.ok(p.q('#jobs-intro').open, 'and the header button brings the intro back');
   contributions[0].unmount();

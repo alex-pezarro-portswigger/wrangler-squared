@@ -3,6 +3,10 @@ import { access as defaultAccess } from 'node:fs/promises';
 import { kick, makeCreateJob } from './job-create.js';
 import { settingsSchema } from './jobs-schema.js';
 import { runFile } from './job-github.js';
+import { thumbnailOf, readEvidence, keepAskImages, readIdeaImage } from './job-evidence.js';
+import { workingTreeHash } from './git.js';
+import { TREE_MOVED } from './job-store.js';
+import { readLog } from './job-running.js';
 
 // Control-WS handlers in the EXTENSION signature: `handler(msg, host)` — no
 // `ctx`, and therefore no `ctx.reply`. Core's control/handlers/jobs.js replied
@@ -23,24 +27,56 @@ export function makeJobCreateHandler(deps) {
     async handler(msg, host) {
       let job;
       try {
-        job = await createJob(host, msg);
+        job = await createJob(host, { ...msg, idea: msg.idea === true });
       } catch (e) {
         host.broadcast({ event: 'job-create-failed', error: e?.issues?.[0]?.message || e?.message || String(e) });
         return;
       }
-      host.broadcast({ event: 'job-created', jobId: job.id, started: Boolean(msg.start) });
+      host.broadcast({ event: 'job-created', jobId: job.id, started: Boolean(msg.start), ...(job.idea ? { idea: true } : {}) });
     },
   };
 }
 export const jobCreateHandler = makeJobCreateHandler();
 
+// The two actions that need something only an async read can give: the tree as
+// it is NOW (approve-code is pinned to the one the agent reported) and the
+// pictures pasted into an idea, kept beside the round they were sent in (or the
+// job's or step's own ideas folder when no round holds it). Whatever the client
+// sent under these names is discarded.
+export const ASK_IMAGES_MAX = 4;
+async function prepare(msg, host) {
+  const { treeHash: _t, attachments: _a, refused: _r, ...clean } = msg;
+  const job = host.stores.jobs.get(msg.id);
+  const sub = job?.subJobs.find((s) => s.id === msg.subJobId);
+  if (msg.action === 'approve-code' && sub?.ready?.treeHash && sub.worktree?.path) {
+    return { ...clean, treeHash: await workingTreeHash(sub.worktree.path).catch(() => null) };
+  }
+  if (['request-change', 'idea-reply'].includes(msg.action) && Array.isArray(msg.images) && msg.images.length && job) {
+    const names = msg.images.filter((n) => typeof n === 'string').slice(0, ASK_IMAGES_MAX);
+    // A board upload is only STAGED, and read() sees only this extension's kept
+    // store, so each is kept first. One that cannot be is refused, never dropped:
+    // the human saw it in the tray and believes it went.
+    const got = names.map((n) => (host.images.keep(n) ? host.images.read(n) : null));
+    for (const n of names) host.images.remove(n);
+    const kept = got.every(Boolean) ? keepAskImages({ jobId: job.id, subId: sub?.id, round: sub?.ready?.round, messageId: Date.now().toString(36), images: got }) : [];
+    if (kept.length < names.length) return { ...clean, refused: 'An attached image could not be kept. Attach it again.' };
+    return { ...clean, attachments: kept.map(({ file, mime, path }) => ({ file, mime, path })) };
+  }
+  return clean;
+}
+
 export const jobActionHandler = {
   type: 'job-action',
-  async handler(msg, host) {
+  async handler(raw, host) {
+    const { refused, ...msg } = await prepare(raw, host);
     const ids = { jobId: msg.id, action: msg.action, ...(msg.subJobId ? { subJobId: msg.subJobId } : {}) };
+    if (refused) { host.broadcast({ event: 'job-action-failed', ...ids, error: refused }); return; }
     // A refusal goes out as a frame rather than a throw, which never reaches the
     // board: the footer's checkpoint buttons snap back and say why.
     try { host.stores.jobs.action(msg.id, msg.action, msg); } catch (e) {
+      // The tree moved under the approval: the parked session is asked to report
+      // ready again (job-parked.js), and the human is told why nothing happened.
+      if (e?.code === TREE_MOVED) { try { host.stores.jobs.action(msg.id, 'tree-moved', msg); await host.rebuild(); kick(host).catch(() => {}); } catch { /* the refusal below still says it */ } }
       host.broadcast({ event: 'job-action-failed', ...ids, ...(msg.field ? { field: msg.field } : {}), error: e?.message || String(e) });
       return;
     }
@@ -93,7 +129,8 @@ export const jobOpenIdeHandler = makeOpenIdeHandler();
 // The job dialog's thumbnail strip. A job's pictures live in the extension's own
 // store (`images:keep`) and nothing serves that store to a browser, so the bytes
 // ride the one outbound channel there is. Asked once per job per dialog, and a
-// name the store has lost is simply absent.
+// name the store has lost is simply absent. Pictures pasted into a New idea's
+// conversation ride along as `idea:<file>`.
 export const jobImagesHandler = {
   type: 'job-images',
   handler(msg, host) {
@@ -102,7 +139,56 @@ export const jobImagesHandler = {
       const got = host.images.read(name);
       return got ? [{ name, mime: got.mime, dataBase64: Buffer.from(got.bytes).toString('base64') }] : [];
     });
+    for (const { file } of (job?.idea?.thread || []).flatMap((m) => m.images || [])) {
+      const got = readIdeaImage({ jobId: job.id, file });
+      if (got) images.push({ name: `idea:${file}`, mime: got.mime, dataBase64: got.bytes.toString('base64') });
+    }
     host.broadcast({ event: 'job-images', jobId: msg.id, images });
+  },
+};
+
+// The proof a Code review step shows (job-evidence.js). Nothing serves the
+// extension's files to a browser (TODO(host-api files:serve)), so they ride the
+// one outbound channel there is, like the job's images: the round's THUMBNAILS
+// when the dialog or board asks, one full file when a shot is opened. `round`
+// defaults to the sub-job's current one. A missing or unreadable file is simply
+// absent; the grid draws a placeholder.
+export function makeEvidenceHandler({ run = runFile } = {}) {
+  return {
+    type: 'job-evidence',
+    async handler(msg, host) {
+      const job = host.stores.jobs.get(msg.id);
+      const sub = job?.subJobs.find((s) => s.id === msg.subJobId);
+      if (!sub) return;
+      const round = Number.isInteger(msg.round) ? msg.round : sub.ready?.round;
+      const base = { event: 'job-evidence', jobId: msg.id, subJobId: sub.id, round };
+      if (!round) return host.broadcast({ ...base, thumbs: [] });
+      if (msg.file) {
+        const got = readEvidence({ jobId: job.id, subId: sub.id, round, file: msg.file });
+        return host.broadcast({ ...base, file: msg.file, ...(got ? { mime: got.mime, dataBase64: Buffer.from(got.bytes).toString('base64') } : {}) });
+      }
+      const inThread = (sub.thread || []).filter((m) => m.round === round).flatMap((m) => [...(m.shots || []), ...(m.images || [])].map((s) => s.file));
+      const files = [...new Set([...((sub.ready?.round === round ? sub.ready : sub.earlier?.find((e) => e.round === round))?.proof || []).flatMap((p) => (p.shots || []).map((s) => s.file)), ...inThread])];
+      const thumbs = (await Promise.all(files.map(async (file) => {
+        const t = await thumbnailOf({ jobId: job.id, subId: sub.id, round, file, run });
+        return t ? { file, mime: t.mime, dataBase64: Buffer.from(t.bytes).toString('base64') } : null;
+      }))).filter(Boolean);
+      host.broadcast({ ...base, thumbs });
+    },
+  };
+}
+export const jobEvidenceHandler = makeEvidenceHandler();
+
+// The Logs button on the Running for you bar: the tail of the file the agent sent
+// its process output to (job-running.js readLog decides what may be read). An
+// answer or a reason goes out as a frame; the board shows it under the bar.
+export const jobRunningLogsHandler = {
+  type: 'job-running-logs',
+  handler(msg, host) {
+    const job = host.stores.jobs.get(msg.id);
+    const sub = job?.subJobs.find((s) => s.id === msg.subJobId);
+    const got = sub ? readLog(job, sub, String(msg.name || '')) : { error: 'Sub-job not found' };
+    host.broadcast({ event: 'job-running-log', jobId: msg.id, subJobId: msg.subJobId, name: msg.name, ...got });
   },
 };
 
@@ -155,4 +241,4 @@ export function makeFeatureRequestHandlers({ run = runFile } = {}) {
   }];
 }
 
-export const HANDLERS = [jobCreateHandler, jobActionHandler, jobSettingsHandler, jobOpenIdeHandler, jobImagesHandler, ...makeFeatureRequestHandlers()];
+export const HANDLERS = [jobCreateHandler, jobActionHandler, jobSettingsHandler, jobOpenIdeHandler, jobImagesHandler, jobEvidenceHandler, jobRunningLogsHandler, ...makeFeatureRequestHandlers()];

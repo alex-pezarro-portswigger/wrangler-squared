@@ -1,16 +1,39 @@
 # AGENTS.md
 
-Developer notes for Wrangler² — the Agent Wrangler automated-jobs system as an
-installable extension. Only the non-obvious, durable things; point at code rather
+Developer notes for Wrangler² — a new way of working with AI (work broken into
+AI sessions and PRs, with proof that changes work) as an installable Agent
+Wrangler extension. Only the non-obvious, durable things; point at code rather
 than re-deriving it. **Read `docs/PORTING.md` first**: the port is functionally
-complete on host API 1.31.0, and that file is the map (what came from where, what
+complete on host API 1.38.0, and that file is the map (what came from where, what
 stands in for what, and which of the eight open host-API gaps block which
 feature).
+
+## This repository is public open source
+
+> **Everything here is public: code, commits, branch names, PR titles and
+> bodies, review comments, docs and test fixtures.** Never put anything specific
+> to an employer or its customers in any of them: internal repo or service
+> names, hostnames, internal or customer URLs, ticket keys, chat channels,
+> colleague names, credentials or tokens, or internal process. Keep examples
+> generic (`example.com`, `acme/widgets`, `PROJ-123`). If a change only makes
+> sense with such a detail, leave the detail out and say so to the human
+> instead.
+
+## This repository's own issues
+
+Some work on this repo is tracked in its GitHub issues. A planner for a
+Wrangler² job that targets this repo looks for a matching open issue (`gh issue
+list`/`gh issue view`) and proposes writes there with
+`place: {type: "other", name: "GitHub", ref: "charlie-ps/wrangler-squared#N"}`: a comment
+linking the PR (`{pr.url}`), or closing the issue once the PR merges
+(`on: {sub, at: "merged"}`). Work with no issue may propose creating one.
+Issues are optional, like Jira stories: never invent a number, and keep issue
+text as public as the rest of this repo.
 
 ## What this is
 
 - An **external extension** for agent-wrangler's extensions API, which is on
-  agent-wrangler `main` (host API 1.31.0). Spec:
+  agent-wrangler `main` (host API 1.38.0). Spec:
   `docs/superpowers/specs/2026-09-11-extensions-api-design.md` in that repo.
 - The wrangler clones this repo into `<DATA_DIR>/extensions/jobs/`, runs
   `npm ci --ignore-scripts`, and imports `index.js`. **The manifest `id` (`jobs`)
@@ -20,13 +43,13 @@ feature).
   duplicated by design and must agree (`id`, and `requires` in the manifest may
   not be WIDER than the block's). `requires` is the five `sessions:*` (read, spawn,
   archive, bill, wake) plus `mail:send`, `tasks:read`/`tasks:write`, `usage:read`,
-  `board:rebuild`/`board:broadcast` and `images:keep`. Task read/write lets New job validate a
+  `board:rebuild`/`board:broadcast`, `images:keep` and `files:view`. Task read/write lets New job validate a
   selected Task or create one; spawn's `taskId` still binds task memory and
   assigns the card itself. `mail:send` and `sessions:wake` (both host API 1.0)
   resume a session parked on its drafts once the human has decided them:
   mail carries the final writes, and a card gone dormant meanwhile is woken
   first. `engines.wranglerApi` is
-  `^1.31.0`: 1.4 added the worktree/`addDirs`/`taskId`/PR-automation spawn
+  `^1.38.0`: 1.4 added the worktree/`addDirs`/`taskId`/PR-automation spawn
   options this repo depends on, 1.6 the `usage:read`/`sessions:bill` pair the
   Jobs board's prices and triage billing depend on, 1.8 the client
   `api.openSession(sid)` behind the sub-job dialog's Open/Restore session button
@@ -36,7 +59,7 @@ feature).
   client `api.agents()` the New job form reads its models and efforts from,
   1.27 the client `api.openDiff` behind Review code in Wrangler, and 1.31 the
   `images:keep` capability plus the `images` spawn option behind a job's attached
-  images (client `api.images.stage` stages them; the job keeps its own copies; the New job tray is `public/job-images.js`, built on a vendored `public/clipboard-images.js`).
+  images (client `api.images.stage` stages them; the job keeps its own copies; the New job tray is `public/job-images.js`, built on a vendored `public/clipboard-images.js`), and 1.38 the `files:view` capability plus client `api.openFile`/`api.files` behind Open on a file place (`server/job-files.js` registers each reported path; `public/job-graph.js filePathHtml` shows Open only when `api.files?.canOpen(path)`).
 - **`package-lock.json` is mandatory** — the wrangler refuses to install without
   one. Regenerate it after any dependency change.
 
@@ -103,7 +126,138 @@ feature).
   decided and the runner mails it (`run.mailedAt`). Don't let a new liveness or
   idle rule reach a parked run. A stored write with no `by` predates this and is
   failed on load (`job-store.js migrateSessionWrites`), never run;
-  `validatePlan` looks past it so moves still work on that job.
+  `validatePlan` looks past it so a plan edit still works on that job.
+- **One action brings an idea in: `request-change {subJobId?, at, ref, text}`**
+  (`server/job-change.js`), from the Add idea box (`changeBoxHtml`, plain words
+  plus pictures, no chips) on every step, review and proposal; it replaced `revise-session`, both `replan` forms, `fix-here`
+  and the seven moves (Retry stays a button). `at`/`ref` pin it to what the
+  human read (`changeView`, mirrored client-side in `public/jobs.js`): a moved
+  head, receipt, revision or proposal refuses it. Every idea goes to ONE
+  recipient, the planner (`requestReplan`, with `replan.source = {sub, at, ref}`
+  and the idea's `images`), except a first plan (redrawn via `job.feedback`); a
+  declared red still goes up with what was tried. The planner sorts it into
+  actions on live steps (`forward` to a session parked on review, `rework`) and
+  plan edits, and the human approves that proposal (one of `forward`s alone is
+  applied at once, `forwardsOnly`): an action on the source step
+  is refused at stamp and approval once its view has moved (`job-actions.js
+  sourceHolds`). A second idea while a proposal waits adds to it (`Earlier: … /
+  Now: …`, `previousActions`); while the planner is drawing the box steps aside.
+  The box is not a `<form>`, so
+  a tick's redraw is held back only while text is typed in it. Its pictures are
+  kept (`handlers.js prepare`: the round's folder, else `ideasDir`) and reach the
+  planner as paths in the idea's words; a `forward` to the step it was typed on
+  carries that round's pictures as thread images. What was sent stays as a bubble (`askSent`) until the dialog
+  moves on, ticked by `job-action-complete`, refused back into the box.
+- **Red steps go up one level before the human** (`server/job-red.js`). A sub-job
+  with an `error` is sent to the planner by the runner's `triageRed` when
+  `settings.maxReplans` > 0 (0 = the old "red waits for you"), one replan at a
+  time, stamped `run.red` and counted per step; the replan carries `job.replan.red
+  = {sub, auto, n}` and holds only that step and its dependants (`heldBy`, mirrored
+  client-side as `heldByReplan`/`redScope`: use them, never `!job.replan`, for
+  per-sub gates). The sixth checkpoint `reviewRed` (true = "You decide", the
+  default) only chooses whether the proposal waits; Accept red, Mark and Recover
+  are never applied automatically. A red is DECLARED by `declareRed` (tries used up,
+  `escalate`, a planner that blocked or died, an empty proposal) and its
+  `declared.ref` is `redRef` (error, head, merge commit, run count): a new
+  failure, head or run un-declares it and a decision about the old one
+  (`red.held`) never carries over. `blocked`, `replan` and `escalate` are the
+  "go up one level" receipts. The board's states are `redFixing` (not counted in
+  Needs you), `redFixReady` and `redDeclared` in `public/jobs.js`.
+- **A proposal can carry actions and up to three ranked options**
+  (`server/job-actions.js`, applied by `approveReplan`): `accept-red`, `mark`
+  (merged/done, `evidence` required), `rework` and `recover {fix}` on a live
+  sub-job. The server stamps each with a pin (PR head, merge commit or stage) at
+  proposal time and `approve-replan` refuses if it moved; the planner never
+  writes a pin (the schema is strict). Options are the receipt's own plan first,
+  then `alternatives` (max 2), each merged and stamped when the receipt lands, so
+  one bad option refuses the whole receipt; approve takes `option`. An action is
+  drawn as a mark on its graph node (`actionMark`).
+- **A session parks after `ready`, so the human can ask it things** (`server/job-parked.js`).
+  With Code on You review the `ready` receipt does NOT set `run.report` (that ends a run):
+  it sets `run.readyReport`, `parkedFor: 'ready'`, `parkedAt` and clears `mailedAt`, like a
+  drafts park (no slot, `settle()` holds it only to its card existing) but never matched by
+  `draftsDecided`. The run waits on `waitsOnReview`; approve, a rework, drop or a retry end
+  it quietly and the publish run then claims the sub-job. An approved `forward {sub, note}`
+  action (pinned to `{at:'round', ref: ready.receiptId}`, refused while `answering`; a `rework`
+  of a parked step is refused in its favour) writes a `sub.thread` message (`askAgent`,
+  `via: 'planner'`, `sentAt: null`) and the runner mails
+  it (`deliverThread`, `threadMail`), setting `mailedAt` (the run is working again). The
+  agent answers with `reply {text, shots?, run?}` (parks again; tree and round unchanged) or
+  a fresh `ready`: round n+1, `receiptId` `<run>#n`, the old round kept in `sub.earlier`.
+  Pasted images are copied into the round's folder and mailed as paths
+  (`TODO(host-api mail:images)`). `ready.treeHash` (`git.js workingTreeHash`: `add -A` into a
+  temp index, `write-tree`) is read by the tool handler at the receipt; `approve-code` is
+  refused unless the `job-action` handler's fresh read matches (`TREE_MOVED` also queues a
+  `retell` message). Code on Auto never parks.
+- **An approval can carry words for later steps.** `approve-session` and `approve-code` take an
+  optional `note` (a string, trimmed, at most 2,000 characters or refused; `job-store.js
+  approvalNote`), kept as `sub.approvalNote` and recorded on the move, so the step's own history
+  shows it. `job-prompts.js approvalNotesBlock` hands every note upstream of a sub-job (transitive
+  `after`, `upstreamOf`) to each of its prompts as quoted JSON, capped at 8,000 characters like
+  `humanOutputBlock`. A bulk release (a checkpoint switched to Auto) carries none and clears it.
+  On the board Approve stays one click that sends no note; its caret (`approveSplitHtml`) opens a
+  popup whose `[data-with-note]` button sends `[data-approve-note]`, and typed text holds back a tick's redraw.
+- **New idea is a job that may start as a conversation** (`server/job-idea.js`, `public/job-idea.js`).
+  Only the board's form sets `idea` (`job-create` `idea:true` → `job.idea.thread`); `create_job` never does.
+  Its planning run either reports `plan` as any job's does, or `reply {text, suggest?:{title, plan}}`,
+  which parks the run (`parkedFor: 'idea'`, no slot, like a ready park) until the human's `idea-reply`
+  is mailed by the runner (`deliverIdea`, `ideaMail`). `accept-idea {messageId}` is pinned to the newest
+  message: it applies the suggestion exactly as a plan receipt (Plan review still applies), and settle()
+  then ends the parked run quietly because the job is no longer `inConversation`. A fresh planning run
+  (a retry) reads the whole thread from its prompt, so `claim` marks unsent messages sent. The chat
+  dialog redraws on ticks even with the cursor in its empty reply box; only new messages fade in.
+- **What the agent leaves running is the agent's; tearing it down is ours** (`server/job-running.js`).
+  `ready` (and a restarting `reply`) may carry `running: [{name, url?, pid?, stop?, log?}]`, the
+  agent's own detached (`setsid`) dev server, database, worker; the extension never starts one. It is kept
+  as `sub.running` (`items` with a probed `up`, `owed` for entries a later round dropped, `stopped` after a
+  teardown). The runner's `sweepRunning` runs FIRST each tick (so before cleanup removes the worktree a
+  `stop` command runs in, and at boot): it tears down `dueTeardown` (owed, plus everything once
+  `holdsRunning` is false: approve, drop, cancel, replan, cleanup, retry), probes the rest, and writes only
+  when up/down flips. Teardown kills the pid's group (just the pid if it does not lead one; never our own
+  process), runs each `stop` in the worktree, then checks the URLs stopped answering, and NEVER fails an
+  approval: a leftover is `stopped.still`, drawn amber. Code on Auto owes everything at once. Logs reads only
+  from under the worktree or the proof inbox (symlinks resolved). `restart-running` mails the parked session
+  via `askAgent` (`kind: 'restart'`); `stop-running` just owes. The bar and dot are `public/job-running.js`.
+- **A PR's `show` list is answered with proof, not claims** (`server/job-evidence.js`).
+  The implementer saves files into one inbox per sub-job (`$JOB_EVIDENCE`, given in
+  its prompt and granted as `addDirs`); the `ready` receipt names them per check
+  (`shots`, `run` or `couldNot`), `job-store.js _proofOf` refuses a receipt that
+  leaves a `show` item out and copies exactly the named files, sniffed by magic
+  bytes and capped at 5 MB, into `round-<n>`. `ready.checks` stays plain strings
+  (history and the old list read it); the proof lives beside it as `ready.proof`.
+  The board gets bytes only as `job-evidence` frames (thumbnails via `sips`), cached
+  in `public/job-proof.js`. A sub-job with `show` items reports `ready` even with
+  Code on Auto (`leavesUncommitted`), so the proof is kept.
+- **Fast-forward main never blocks a sub-job** (`server/job-main.js`). The global
+  `settings.updateMain` ("Keep local main updated", on by default; a job's old `updateMain` is
+  ignored) is handed to cleanup by the runner, and the update returns, never throws: a clean
+  checkout on the base merges `--ff-only`, one on another branch gets `git fetch origin
+  <base>:<base>`, and a dirty or diverged one (or any git error) becomes a notice in
+  `job.mainNotices`, one per checkout path (`noteMain` merges sub-jobs and clears it on a later
+  success). Each notice offers the fixes `resolutionsFor` allows (rebase & push, move commits to a
+  branch, stash & update). `retry-main` and `resolve-main` only flag it; the runner's `tendMain`
+  acts on the next tick, finished or paused jobs included: it spawns the fix's session (a plain
+  one in the checkout, briefed by `resolvePrompt` with only that fix) inside the tick so no
+  `pendingLaunch` is in flight, then clears the notice once local `<base>` equals origin's.
+  A notice nothing is retrying or resolving (`job-state.js mainWaiting`) is a Needs you ask
+  beside the stage roll-up, never part of it: `jobNeedsYou`, `jobLabel` ("Local main behind",
+  even on a Delivered job) and `plateAsk` all read it, below any step's own ask.
+- **Ask an agent opens the human's own session about a step, never a step** (`server/job-helper.js`).
+  Every step's dialog has the button, at any stage and on a cancelled job. `ask-helper` queues
+  `{id, at, sessionId: null}` on `sub.helpers` (refused while one is queued: that is the double-click
+  guard) and marks a waiting human task `doing` unless a replan holds it; the runner's `tendHelpers`
+  spawns it inside the tick, like `tendMain`, so no `pendingLaunch` is in flight: a plain session (no
+  worktree, no PR automation; the job's agent/model/effort and task) in `helperCwd` (the step's checkout,
+  else a prerequisite PR's, else `''`, a scratch workspace; never a worktree), briefed by
+  `job-prompts.js helperPrompt`. A failed spawn is `error` on that entry, which frees the button. Its id is
+  kept OUT of `sub.sessions` (cleanup archives those; Open session and Review code read the last) and
+  `job.runs` (`runForSession` would hand it job_report, the worker skill and the job's sandbox). What it
+  finds comes back only through `send_step_idea` (`server/tools.js`), when the human asks: the store's
+  `helperIdea` resolves the caller against `sub.helpers[].sessionId` (anything else is refused) and runs
+  the step's own `requestChange`, pinned to `changeView` as it stands at the call, with `from: 'helper'`,
+  which marks the planner's words and the move (`helper-idea`). Only the server sets `from`: the board's
+  `request-change` overwrites it. The idea is kept on its entry (`helper.ideas`), drawn under that helper
+  in the step's dialog. It never edits the plan.
 - **A Codex job's sandbox is the manifest's `codexPolicy` hook** (host API 1.12),
   next to `skillsFor` and gated the same way (`runForSession`). Its context
   carries the façade as `ext`, not `host`. A job with no `sandbox` field (one
@@ -114,6 +268,20 @@ feature).
   "Launches" line (`public/job-sandbox.js`) mirrors `CODEX_POLICY`, so change
   them together.
 - **New job's model picker is `public/model-picker.js` over `public/model-plates.js`.** It owns no form state: it reports `{ agent, model, effort }` through `onChange` into hidden inputs, so `form.onsubmit` and the `job-create` payload are untouched, and creating a job saves `settings.usualPick`. `describe()` must never invent a version from an alias (gap 18 in `docs/PORTING.md`). A galaxy plate is exactly one rAF loop, stopped by `dispose()`/re-render; art colours are fixed, chrome is board variables, except Claude's cabinet and ticket, whose launch-page near-black/ivory follows core's `body.light`. Each Claude plate declares its own noise filters (`fx()`), so plates never share an SVG id.
+- **A theme is one `public/themes.js` entry, one `[data-theme="<id>"]` block of `--jt-*` tokens in
+  `jobs.css` and its id in `public/theme-ids.js`** (which the server schema also reads, and whose
+  `migrateTheme` turns a saved `backdrop`/top-level `plateArt` into `theme`/`themeOptions`; every board
+  from before themes gets `DEFAULT_THEME`, Wrangler, and `migrateJobs` resets a version-5 file's Space
+  to Wrangler once, so Space is only ever an active choice).
+  `themes.test.js` holds every block to Space's token set, so never style a theme by excluding another
+  (`:not([data-theme…])`) or read a `--jt-*` token Space does not set. `applyViewTheme` stamps
+  `data-theme` (and `data-scheme="dark"` for a forced-dark theme) on `#jobs` and every dialog on
+  `<body>`; a theme's `mount` is its only live art, so a theme without one runs no animation loop.
+  Theme-only options live in `settings.themeOptions[id]` and must be listed in the server schema.
+  The picker (`public/theme-picker.js`) is a radio list of themes beside a captioned preview, and saves
+  each choice at once; Save settings never sends the theme. A theme draws no picture of its own: the
+  preview is the real masthead and plates in its tokens (`public/theme-preview.js`), with their buttons
+  and links turned to spans and the whole picture `inert`, so it never reads or acts as a control.
 - **What's new is `public/updates.js`'s `UPDATES`, oldest first.** A bigger release appends `{ id, date, title, body }` (our own copy; optional `icon`, `tone`, `figure`, `anim`); every unseen one opens in one run, oldest first, and closing it records them all under `updatesSeen`. A first-run reader gets the intro instead, and closing that counts every current update seen, so an id must never be reused.
 - **Client modules import their leaves RELATIVELY** (`./util.js`, `./icons.js`,
   vendored) rather than from the board by absolute URL, so the same files load
@@ -143,3 +311,7 @@ feature).
 - `AW_REPO=<wrangler checkout on the API branch> node scripts/validate-manifest.mjs`
   runs the real loader over this repo: discovery + import scan, `validateManifest`,
   `loadExtensions` with the core tool/handler names, `buildHostApi`.
+- `AW_REPO=<npm ci'd wrangler checkout> scripts/boot-smoke.sh` boots that wrangler
+  on a fresh data dir and free port with this checkout copied in as
+  `extensions/jobs`, then runs `scripts/dev-smoke.mjs`, which exits 1 on any
+  failed expectation (quarantine, missing frame or tool). CI runs it last.

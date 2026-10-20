@@ -148,3 +148,26 @@ test('a write added or moved to a session that has finished is refused; to one r
   assert.equal(lines.filter((l) => l.sub.id === 'r2').length, 1, 'said once, however many writes it gained');
   assert.match(lines.find((l) => l.sub.id === 'r2').detail, /sent “Run r2” back to work/);
 });
+
+test('a PR\'s base moves in a replan until its worktree or PR exists, then it is fixed', () => {
+  const subs = [spec('a'), spec('b', [], { base: 'next' })];
+  const j = job(subs, [live(subs[0]), live(subs[1], { worktree: { branch: 'b-br' } })]);
+  const { plan, changes } = mergeReplan(j, { context: '', stories: [], subJobs: [spec('a', [], { base: 'next' }), spec('b', [], { base: 'next' })] });
+  assert.equal(plan.subJobs[0].base, 'next');
+  assert.deepEqual(changes.edited, [{ id: 'a', fields: ['base'] }]);
+  assert.throws(() => mergeReplan(j, { context: '', stories: [], subJobs: [spec('a'), spec('b')] }), /b: base cannot change, its branch is already cut/);
+  const k = job(subs, [live(subs[0]), live(subs[1], { pr: { url: 'u' } })]);
+  assert.throws(() => mergeReplan(k, { context: '', stories: [], subJobs: [spec('a'), spec('b', [], { base: 'main' })] }), /PR open/);
+  assert.deepEqual(mergeReplan(j, { context: '', stories: [], subJobs: [spec('a'), spec('b', [], { base: 'next' })] }).changes.kept, ['a', 'b']);
+});
+
+test('an approved base change reaches the live sub-job, which is what the launch reads', () => {
+  const subs = [spec('a', [], { base: 'next' })];
+  const j = { ...job(subs, [live(subs[0], { base: 'next' })]), replan: { feedback: 'Land on main', proposal: { id: 'p1', plan: { context: '', stories: [], subJobs: [spec('a')] } } } };
+  approveReplan(j, 'p1', { now: 1 });
+  assert.equal(j.plan.subJobs[0].base, undefined);
+  assert.equal(j.subJobs[0].base, undefined, 'a base left out lands on the default branch');
+  const k = { ...job(subs, [live(subs[0], { base: 'next' })]), replan: { feedback: 'Land on main', proposal: { id: 'p1', plan: { context: '', stories: [], subJobs: [spec('a', [], { base: 'main' })] } } } };
+  approveReplan(k, 'p1', { now: 1 });
+  assert.equal(k.subJobs[0].base, 'main');
+});

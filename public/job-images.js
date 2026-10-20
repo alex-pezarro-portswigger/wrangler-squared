@@ -1,8 +1,9 @@
 import { imageSources, sourceToFrame, imageMimeOf } from './clipboard-images.js';
+import { applyTheme } from './themes.js';
 
 export const MAX_JOB_IMAGES = 8;
 
-const blobOf = ({ mime, dataBase64 }) => {
+export const blobOf = ({ mime, dataBase64 }) => {
   const bin = atob(dataBase64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -16,6 +17,7 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 export function openZoom(src, label, doc = globalThis.document) {
   const zoom = doc.createElement('dialog');
   zoom.className = 'job-image-zoom';
+  applyTheme(zoom);
   zoom.setAttribute('aria-label', label);
   const img = doc.createElement('img');
   img.src = src;

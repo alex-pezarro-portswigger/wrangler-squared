@@ -1,4 +1,9 @@
 import { ICONS } from './icons.js';
+import { SHOTS, proofFigure, runningBar } from './figs.js';
+import { plateHtml } from './job-plates.js';
+import { ideaThreadHtml } from './job-idea.js';
+import { mountSkies, releaseSkies } from './job-skylines.js';
+import { applyTheme } from './themes.js';
 
 // What's new: a splash for each bigger release, shown once per browser, and the
 // list Automation settings reads to show any of them again. Seen ids live in the
@@ -11,7 +16,7 @@ const done = (items) => `<ul class="intro-done">${items.map((t) => `<li>${ICONS.
 
 // The Writes figures, in the job graph's own vocabulary (job-state.js tones,
 // job-graph.js place pills): [tone, state glyph, solid tile].
-const ST = { queued: ['idle', 'planned', false], running: ['run', 'spin', true], review: ['warn', 'eye', true], done: ['ok', 'check', true] };
+const ST = { queued: ['idle', 'planned', false], running: ['run', 'spin', true], review: ['warn', 'eye', true], done: ['ok', 'check', true], failed: ['bad', 'x', true] };
 const tile = (state, icon) => `<span class="job-node-tile${ST[state][2] ? ' on' : ''}">${ICONS[icon]}<span class="job-node-state">${ICONS[ST[state][1]]}</span></span>`;
 const node = (state, icon, title, line) => `<div class="job-node tone-${ST[state][0]}">${tile(state, icon)}<strong class="job-node-title">${title}</strong><span class="job-status">${line}</span></div>`;
 // Dashed until the place exists, a dot per write, amber while one waits on you.
@@ -30,7 +35,7 @@ const DESIGN = scenes([
 ]);
 function designFigure(phase) {
   const f = DESIGN[phase];
-  const mock = [['warn', 'Plan', true], ['warn', 'Code', true], ['idle', 'Merge', false], ['idle', 'Writes', false]]
+  const mock = [['warn', 'Plan', true], ['warn', 'Local verification', true], ['idle', 'Merge', false], ['idle', 'Writes', false]]
     .map(([t, n, on]) => `<div class="wn-art-cp tone-${t}"><i></i><span>${n}</span><span class="wn-art-tg${on ? ' on' : ''}"></span></div>`).join('');
   const body = f.view === 'live' ? `<div class="wn-art-title wn-fade">Checkpoint buttons</div><div class="wn-art-mock wn-fade">${mock}</div>`
     : f.view === 'draft' ? '<div class="wn-art-sk" style="width:55%"></div><div class="wn-art-sk"></div><div class="wn-art-sk" style="width:80%"></div><div class="wn-art-sk" style="width:65%"></div>' : '';
@@ -74,6 +79,172 @@ function tellFigure(phase) {
     </div>`;
 }
 
+// See it working, in the board's own markup (figs.js checklist and running chip,
+// job-thread.js thread, jobs-view.js Add idea box) fed with example data.
+// The Add idea box with words in it. A <div> where the board has a <textarea>,
+// so the words wrap and show in full rather than scrolling in one row.
+const composer = (text) => `<div class="job-change has-text is-open">
+  <div class="job-change-row"><span class="job-change-to"><i>T</i>This session</span><div class="wn-change-text">${text}</div><label class="job-change-attach">${ICONS.image}</label><button type="button" class="job-change-go" tabindex="-1">${ICONS.send}</button></div>
+  <div class="job-change-foot"><span>A question gets an answer. A change gets a new round.</span><span>Paste or drop a screenshot</span><kbd>⌘↵ to send</kbd></div></div>`;
+const thread = (msgs, state) => {
+  const head = { waiting: [ICONS.terminal, 'Its session is waiting on your review', 'Paused · no slot · keeps its context'], answering: [ICONS.spin, 'Answering you', 'Working on what you sent'], stopped: [ICONS.terminal, 'Session stopped', 'Approved round 1'] }[state];
+  const msg = ([from, text, at, att]) => `<div class="job-msg ${from} wn-fade"><span class="job-msg-who">${from === 'human' ? 'You' : 'Session'}</span><div><p>${text}<time>${at}</time></p>${att ? `<div class="job-msg-att"><span class="job-proof-thumb"><img alt="" src="${SHOTS[att]}"></span></div>` : ''}</div></div>`;
+  return `<section class="job-thread ${state}"><div class="job-thread-head">${head[0]}<b>${head[1]}</b><small>${head[2]}</small></div>${msgs.map(msg).join('')}</section>`;
+};
+
+// A PR shows each Show me item, leaves the preview running, answers a question
+// from its open session, and stops what it started once approved. The slot holds
+// the tallest frame, so the title below never moves.
+const SEE = scenes([
+  { pr: ['running', 'Writing the PR'], shown: 0, slot: 'idle' },
+  { pr: ['running', 'Showing it working'], shown: 1 },
+  { shown: 2 },
+  { pr: ['review', 'Ready to verify'], shown: 3, slot: 'bar' },
+  { slot: 'ask' },
+  { pr: ['running', 'Answering you'], slot: 'asked' },
+  { pr: ['review', 'Ready to verify'], slot: 'answered' },
+  {},
+  { pr: ['running', 'Committing & opening the PR'], slot: 'stopped' },
+  { pr: ['done', 'PR open · checks running'] },
+  {}, {},
+]);
+const Q = ['human', 'Does it keep the column order when a filter is on?', '14:02'];
+const A = ['agent', 'Yes. The export follows the table’s visible columns, filtered or not. Here it is with Plan = Pro.', '14:03', 'excel.png'];
+function seeFigure(phase) {
+  const f = SEE[phase];
+  const slot = {
+    idle: `<div class="wn-slot-ghost">${ICONS.play}<span>What it starts stays running for you to try</span></div>`,
+    bar: runningBar('on'),
+    ask: `${runningBar('on')}${composer(Q[1])}`,
+    asked: `${runningBar('on')}${thread([Q], 'answering')}`,
+    answered: `${runningBar('on')}${thread([Q, A], 'waiting')}`,
+    stopped: `${runningBar('stopped')}${thread([Q, A], 'stopped')}`,
+  }[f.slot];
+  return `<div class="wn-see-top">${node(f.pr[0], 'pr', 'Add CSV export', f.pr[1])}<div class="job-chips"><span class="job-chip job-plan-branch">${ICONS.branch}<span>next</span></span><span class="job-chip">${ICONS.eye}<span>Show me · 3 items</span></span></div></div>
+    <div class="wn-see-proof" role="img" aria-label="A pull request shows each Show me item working, leaves its preview running, answers a question from its open session, and stops the preview once you approve">${proofFigure(f.shown)}</div>
+    <div class="wn-slot">${slot}</div>`;
+}
+
+// The new planner, as three short figures: a red step going to the planner first,
+// a decision with ranked options (the board's .job-option), and Add idea sending
+// feedback back to the step that made it.
+const RED = scenes([
+  { pr: ['running', 'Checks running'], pl: ['queued', 'Standing by'], you: ['queued', 'Not needed yet'], e1: '', e2: '', note: 'idle' },
+  { pr: ['failed', '2 tests failed'], e1: 'hot' },
+  { pl: ['running', 'Looking into it'], note: 'look' },
+  { pl: ['done', 'Fix ready'], you: ['review', 'Approve the fix?'], e2: 'ask', note: 'ask' },
+  { you: ['done', 'Approved'], pr: ['running', 'Reworking'], e1: 'landed', e2: 'landed', note: 'sent' },
+  { pr: ['done', 'Checks pass'] },
+  {},
+]);
+function redFigure(phase) {
+  const f = RED[phase];
+  const fix = 'Two tests still expect the old date format. <b>Fix: send the PR back to update both tests.</b>';
+  const n = {
+    idle: ['idle', 'Waiting', '<blockquote class="ph">A red step comes here first.</blockquote>', ''],
+    look: ['run', 'Working', '<blockquote class="wn-fade">Two tests still expect the old date format.</blockquote>', ''],
+    ask: ['warn', 'Needs you', `<blockquote>${fix}</blockquote>`, `<span class="go">${ICONS.check}Approve</span><span>${ICONS.idea}Add idea</span>`],
+    sent: ['ok', 'Approved', `<blockquote>${fix}</blockquote>`, `<span>${ICONS.next}Sent back to the PR</span>`],
+  }[f.note];
+  return `<div class="wn-row3" role="img" aria-label="A pull request fails its checks, the planner finds why and proposes sending it back, you approve, and the checks pass">
+      <div class="wn-stack">${node(f.pr[0], 'pr', 'Add CSV export', f.pr[1])}</div>
+      <span class="wn-edge ${f.e1}"></span>
+      <div class="wn-stack">${node(f.pl[0], 'sparkle', 'Planner', f.pl[1])}</div>
+      <span class="wn-edge ${f.e2}"></span>
+      <div class="wn-stack">${node(f.you[0], 'person', 'You', f.you[1])}</div>
+    </div>
+    <div class="wn-solo"><div class="wn-note tone-${n[0]}"><header>${ICONS.sparkle}<span>Planner</span><span>${n[1]}</span></header>${n[2]}${n[3] ? `<footer>${n[3]}</footer>` : ''}</div></div>`;
+}
+
+const OPTS = [
+  ['Stream the file as it’s written', 'Works for any size. One more PR, about an hour.'],
+  ['Cap the export at 50,000 rows', 'Quick, but big tables lose rows.'],
+  ['Leave big tables for now', 'Ship as it is and open a ticket.'],
+];
+const ASK = scenes([{ shown: 0, sel: false, sent: false }, { shown: 1 }, { shown: 2 }, { shown: 3 }, { sel: true }, { sent: true }, {}]);
+function askFigure(phase) {
+  const f = ASK[phase];
+  const opts = OPTS.map(([t, why], i) => i < f.shown
+    ? `<div class="job-option${f.sel && i === 0 ? ' sel' : ''}${i === f.shown - 1 && !f.sel ? ' wn-fade' : ''}"><span class="wn-rank">${i + 1}</span><span><b>${t}${i === 0 ? '<span class="job-option-rec">Recommended</span>' : ''}</b><small>${why}</small></span></div>`
+    : `<div class="job-option wn-pending"><span class="wn-rank">${i + 1}</span><span><span class="wn-skel"></span></span></div>`).join('');
+  const foot = f.sent ? `<span class="wn-btn ok wn-fade">${ICONS.check}Approved · the PR is sent back to stream it</span>`
+    : `<span class="wn-btn${f.sel ? ' go' : ''}">${ICONS.check}Approve option 1</span>`;
+  return `<div class="wn-ask" role="img" aria-label="The planner asks how to handle exports that time out and offers three ranked options; you approve the recommended one">
+      <div class="wn-route">${ICONS.sparkle}<b>Planner</b><span>needs a decision on <b>Add CSV export</b></span></div>
+      <p class="job-replan-ask">The export times out on tables over 50,000 rows. How should it handle them?</p>
+      <div class="job-options">${opts}</div>
+      <footer>${foot}</footer>
+    </div>`;
+}
+
+const IDEA_TEXT = 'It’s a bit too tall. Make it fit without scrolling.';
+const IDEA = scenes([
+  { d: ['done', 'Published'], pr: ['queued', 'Waits for your approval'], text: '', go: false, route: false },
+  { text: IDEA_TEXT },
+  { go: true },
+  { text: '', go: false, route: true, d: ['running', 'Redoing the mock-up'] },
+  { d: ['done', 'Published again'] },
+  {},
+]);
+function ideaFigure(phase) {
+  const f = IDEA[phase];
+  const box = `<div class="job-change${f.text ? ' has-text is-open' : ''}">
+    <div class="job-change-row"><span class="job-change-to"><i>M</i>Mock-up</span><div class="job-change-text${f.text ? '' : ' ph'}">${f.text || 'Add idea: a change, a question, new work…'}</div><label class="job-change-attach">${ICONS.image}</label><button type="button" class="job-change-go${f.go ? ' on' : ''}" tabindex="-1">${ICONS.send}</button></div>
+    <div class="job-change-foot"><span>The planner works out where it goes</span><span>Paste or drop a screenshot</span><kbd>⌘↵ to send</kbd></div></div>`;
+  const route = f.route ? `<div class="wn-route wn-fade">${ICONS.sparkle}<span>Planner: <b>feedback on the mock-up</b>, so it goes back to the step that made it. The PR’s brief is unchanged.</span></div>` : '<div class="wn-route"></div>';
+  return `<div class="wn-row2s" role="img" aria-label="You write that a published mock-up is too tall; the planner sends it back to the design step, which publishes it again while the PR waits">
+      <div class="wn-stack">${node(f.d[0], 'sparkle', 'Mock-up the splash', f.d[1])}</div>
+      <span class="wn-edge"></span>
+      <div class="wn-stack">${node(f.pr[0], 'pr', 'Build the splash', f.pr[1])}</div>
+    </div>
+    <div class="wn-idea">${box}${route}</div>`;
+}
+
+// New idea, as the board draws it: an example idea job fed to the real plate
+// (job-plates.js) and thread (job-idea.js), so the plate's forming sky brightens
+// as the planner asks and then suggests, and the suggestion becomes the job.
+// Its clock is the reader's, read when the frame is drawn: the idea started six minutes ago.
+const ideaTalk = (now) => {
+  const clock = (m) => now - (6 - m) * 60000;
+  const asked = { id: 'm1', at: clock(3), from: 'planner', text: 'Happy to. Where should it go, and what should it say about each job?' };
+  const answer = { id: 'm2', at: clock(4), from: 'human', text: 'Slack, #team-web. Just the title and its PR.', sentAt: clock(4) };
+  const suggest = { id: 'm3', at: clock(5), from: 'planner', text: 'That’s enough to plan. Here’s the job I’d make:',
+    suggest: { title: 'Post a Friday digest of finished jobs', plan: { subJobs: [
+      { id: 'build', kind: 'pr', title: 'Build the Friday digest', repo: '~/code/wrangler-squared', base: 'next', after: [] },
+      { id: 'post', kind: 'session', title: 'Post the first digest', after: ['build'] },
+      { id: 'slack', kind: 'write', title: 'Post the digest in #team-web', by: 'post', place: { type: 'slack', channel: '#team-web' }, after: [] },
+    ] } } };
+  return { clock, suggest, threads: [[], [asked], [asked, { ...answer, sentAt: null }], [asked, answer, suggest], [asked, answer, { ...suggest, acceptedAt: clock(6) }]] };
+};
+const IDEAS = scenes([
+  { thread: 0, parked: false, fresh: null, press: null, made: false },
+  { thread: 1, parked: true, fresh: 'm1' },
+  { thread: 2, parked: false, fresh: null },
+  { thread: 3, parked: true, fresh: 'm3' },
+  { fresh: null },
+  { press: 'firing' },
+  { press: 'sent' },
+  { thread: 4, made: true },
+  {},
+]);
+// Figure buttons stay out of the tab order, and its thread is not announced every frame.
+const inert = (html) => html.replaceAll('<button ', '<button tabindex="-1" ').replaceAll(' aria-live="polite"', '');
+function ideasFigure(phase) {
+  const f = IDEAS[phase], { clock, suggest, threads } = ideaTalk(Date.now());
+  // Creating it approved the plan, so the job it became is already building.
+  const plan = f.made ? suggest.suggest.plan : null;
+  const subJobs = plan ? plan.subJobs.map((s) => ({ sessions: [], repairs: [], ...s, stage: s.id === 'build' ? 'implementation' : 'queued' })) : [];
+  const job = { id: 'wn-idea', title: 'Friday digest of finished jobs', intent: 'Could the board tell the team what finished each week?', repos: [], stage: f.made ? 'active' : 'planning', subJobs, moves: [], revision: 1,
+    createdAt: clock(0), reviewPlan: true, idea: { thread: threads[f.thread] }, plan,
+    runs: [{ id: 'wn-run', subJobId: null, phase: 'planning', stopped: f.made, parkedFor: 'idea', parkedAt: f.parked ? clock(5) : null, mailedAt: null },
+      ...(f.made ? [{ id: 'wn-build', subJobId: 'build', phase: 'implementation', stopped: false, status: 'working' }] : [])] };
+  const thread = ideaThreadHtml(job, { fresh: (id) => id === f.fresh, firing: f.press && { id: 'm3', state: f.press } });
+  return `<div class="wn-ideas" role="img" aria-label="An idea sits on the board as a forming sky while its planner asks one question, then suggests a job you create with one press">
+      <div class="wn-ideas-plate">${inert(plateHtml(job, 'opus'))}</div>
+      <div class="wn-ideas-chat">${inert(thread)}</div>
+    </div>`;
+}
+
 // Redraws a figure in place, so surviving nodes keep their identity: tones
 // transition, spinners keep turning and fade-ins play only for what is new.
 // Replacing innerHTML every tick made the whole figure flash.
@@ -90,6 +261,9 @@ function morph(a, b) {
     if (!an) return a.appendChild(bn);
     if (an.nodeType !== bn.nodeType || an.nodeName !== bn.nodeName) return a.replaceChild(bn, an);
     if (an.nodeType !== 1) { if (an.nodeValue !== bn.nodeValue) an.nodeValue = bn.nodeValue; return; }
+    // A sky is painted on the client (job-skylines.js mountSkies): keep it while its
+    // parameters hold, and swap in a fresh placeholder to repaint when they change.
+    if (an.classList.contains('gx')) { if (JSON.stringify({ ...an.dataset }) !== JSON.stringify({ ...bn.dataset })) a.replaceChild(bn, an); return; }
     [...an.attributes].forEach((at) => { if (!bn.hasAttribute(at.name)) an.removeAttribute(at.name); });
     [...bn.attributes].forEach((at) => { if (an.getAttribute(at.name) !== at.value) an.setAttribute(at.name, at.value); });
     morph(an, bn);
@@ -124,6 +298,46 @@ export const UPDATES = [
       '<b>Jobs agents create</b> use them too, unless the agent picks a checkpoint itself.',
       '<b>Jobs already on the board keep their own.</b> Change one from its detail footer.',
     ])}` },
+  { id: 'see-it-working', date: '2026-10-15', icon: 'eye', tone: 'run',
+    title: 'See each PR working before you read its diff',
+    body: `<p>A PR can now carry a <b>Show me</b> list: the plan writes one, and you can edit it. Before anything is committed, the agent shows each item working on the running build, as a screenshot, a recording or a command’s output. Anything it couldn’t show is marked in amber with why.</p>${done([
+      '<b>Try it yourself</b>: what the agent started stays running for you, with a link, its logs and Stop. Approve, and it is stopped for you.',
+      '<b>Ask the session</b> in Add idea. It stays open while you review, answers with a shot or output, or makes the change as a new round.',
+      '<b>Approve means what you saw</b>: if a file changes after the receipt, the session is asked to show it again.',
+    ])}`,
+    anim: { frames: 12, ms: 1500, still: 6 }, figure: (phase) => seeFigure(phase) },
+  { id: 'planner-red-steps', date: '2026-10-15', icon: 'sparkle', tone: 'warn',
+    title: 'A failing step goes to the planner first',
+    body: `<p>When a step goes red, the <b>planner</b> now looks at it before you do. It works out what went wrong and proposes a fix, usually sending the step back with a note on what to change.</p>${done([
+      '<b>You approve the fix</b> to start with. Set <b>Red steps</b> to Wrangler replans and a fix like this goes ahead by itself.',
+      '<b>Only that step waits</b>, with the steps after it. The rest of the job carries on.',
+      '<b>If it can’t fix it</b>, it tells you what it found, what it tried and the one thing it needs you to decide.',
+    ])}`,
+    anim: { frames: 7, ms: 1600, still: 3 }, figure: (phase) => redFigure(phase) },
+  { id: 'planner-options', date: '2026-10-15', icon: 'hand', tone: 'warn',
+    title: 'Pick from up to three ranked options',
+    body: `<p>When the planner needs you to decide, it now offers up to three options, best first, each with why. Pick one and approve. Nothing changes until you do.</p>${done([
+      '<b>Each option is a whole plan</b>, with the fixes it makes, such as sending a step back or accepting a red check.',
+      '<b>Accept red and Mark done always wait for you</b>, whatever Red steps is set to.',
+      '<b>Old options are refused.</b> If the PR has moved on since, approving tells you instead of acting on stale facts.',
+    ])}`,
+    anim: { frames: 7, ms: 1600, still: 3 }, figure: (phase) => askFigure(phase) },
+  { id: 'planner-add-idea', date: '2026-10-15', icon: 'idea', tone: 'run',
+    title: 'Say what to change, on any step',
+    body: `<p><b>Change plan</b> is now <b>Add idea</b>: one box on every step, review and proposal. Write what you want in your own words and the planner works out where it belongs.</p>${done([
+      '<b>Feedback goes back to the step that made it.</b> Say a mock-up is too tall and the design is redone, so the PR doesn’t build the same flaw.',
+      '<b>New work becomes a plan change</b> for you to approve. One idea can hold both.',
+      '<b>Paste a screenshot</b> to show what you mean.',
+    ])}`,
+    anim: { frames: 6, ms: 1600, still: 4 }, figure: (phase) => ideaFigure(phase) },
+  { id: 'new-idea', date: '2026-10-16', icon: 'idea', tone: 'warn',
+    title: 'Start with an idea, not a plan',
+    body: `<p><b>New job</b> is now <b>New idea</b>. Write what you’re after in your own words. If it’s clear, the planner plans it. If not, it asks what it needs to know, then suggests a job you create with one press.</p>${done([
+      '<b>Ideas sit on the board</b> as forming skies, beside your jobs, until they become one. The <b>Ideas</b> filter shows just them.',
+      '<b>Keep refining</b> as long as you like: a reply after a suggestion gets a fresh one.',
+      '<b>Creating a suggested job approves its plan</b>, so it starts at once. A plan the planner drafts itself still waits for you with Plan on You review.',
+    ])}`,
+    anim: { frames: 9, ms: 1700, still: 3 }, figure: (phase) => ideasFigure(phase) },
 ];
 
 const dateLabel = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
@@ -171,7 +385,7 @@ export function createUpdates({ storage, updates = UPDATES }) {
     });
     // Every way out, from any update in the run, is the reader having seen the
     // whole run; a reload while it is still open is not.
-    dialog.addEventListener('close', () => { stop(); markSeen(queue.map((u) => u.id)); });
+    dialog.addEventListener('close', () => { stop(); releaseSkies(dialog.querySelector('.update-panel')); markSeen(queue.map((u) => u.id)); });
   }
 
   function render() {
@@ -186,6 +400,7 @@ export function createUpdates({ storage, updates = UPDATES }) {
     next.className = `primary tone-${last ? 'ok' : 'run'}`;
     next.innerHTML = last ? 'Got it' : `Next${ICONS.next}`;
     dialog.querySelector('[data-update="back"]').hidden = at === 0;
+    mountSkies(dialog.querySelector('.update-panel'));
     play();
   }
 
@@ -196,7 +411,7 @@ export function createUpdates({ storage, updates = UPDATES }) {
     timer = win().setInterval(() => {
       phase = (phase + 1) % u.anim.frames;
       const fig = dialog.querySelector('.update-panel .intro-figure');
-      if (fig) patch(fig, u.figure(phase));
+      if (fig) { patch(fig, u.figure(phase)); mountSkies(dialog.querySelector('.update-panel')); }
     }, u.anim.ms);
   }
   function stop() { if (timer) win()?.clearInterval(timer); timer = null; }
@@ -208,6 +423,7 @@ export function createUpdates({ storage, updates = UPDATES }) {
     at = 0;
     phase = list[0].anim && still() ? list[0].anim.still ?? 0 : 0;
     render();
+    applyTheme(dialog);
     if (!dialog.open) dialog.showModal();
     return true;
   }
@@ -227,5 +443,5 @@ export function createUpdates({ storage, updates = UPDATES }) {
 // The What's new section of Automation settings: each row reopens its splash.
 export function whatsNewHtml(items) {
   const rows = items.map((u) => `<li><button type="button" class="update-item tone-${u.tone || 'run'}" data-update-id="${u.id}"><span class="job-node-tile">${ICONS[u.icon] || ICONS.info}</span><span class="update-item-text"><strong>${u.title}</strong><time datetime="${u.date}">${dateLabel(u.date)}</time></span><span class="update-item-end">${u.seen ? '' : '<span class="update-new">NEW</span>'}${ICONS.next}</span></button></li>`).join('');
-  return `<section class="update-section" aria-labelledby="job-settings-updates"><h3 id="job-settings-updates">What’s new</h3>${rows ? `<ul class="update-list">${rows}</ul>` : '<p class="update-empty">Nothing here yet. When a release adds something bigger, it opens once on its own and stays listed here.</p>'}</section>`;
+  return `<section class="update-section" aria-labelledby="job-settings-updates"><h3 id="job-settings-updates">What’s new</h3>${rows ? `<ul class="update-list">${rows}</ul>` : ''}</section>`;
 }

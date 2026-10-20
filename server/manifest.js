@@ -41,9 +41,9 @@ function codexPolicy({ sessionId, ext }) {
 
 export default {
   id: 'jobs',
-  label: 'Automated jobs (Wrangler²)',
+  label: 'Wrangler²',
   description: 'Plan a goal into PRs (under Jira stories where the work has tickets), run each step as its own bounded agent session in a dedicated worktree, and gate the risky moments (plan, code, merge) on a human.',
-  help: 'Adds the Jobs view, the job_report and get_job_context tools for job steps, a create_job tool that lets any other agent session start a job, and the job-worker skill. Jobs and their history stay in jobs.json across toggles.',
+  help: 'Adds the Jobs view, the job_report and get_job_context tools for job steps, a create_job tool that lets any other agent session start a job, a send_step_idea tool a step\'s helper session sends its ideas through, and the job-worker skill. Jobs and their history stay in jobs.json across toggles.',
   author: 'Charlie Goldstraw',
   homepage: 'https://github.com/charlie-ps/wrangler-squared',
   defaultEnabled: true,
@@ -53,9 +53,9 @@ export default {
   requires: [
     'sessions:read', 'sessions:spawn', 'sessions:archive', 'sessions:bill', 'sessions:wake',
     'mail:send', 'tasks:read', 'tasks:write',
-    'usage:read', 'board:rebuild', 'board:broadcast', 'images:keep',
+    'usage:read', 'board:rebuild', 'board:broadcast', 'images:keep', 'files:view',
   ],
-  engines: { wranglerApi: '^1.31.0' },
+  engines: { wranglerApi: '^1.38.0' },
 
   // Instantiated once by the wrangler with `{ id, log }`; the file path is the
   // extension's own choice (server/data-dir.js).
@@ -75,7 +75,7 @@ export default {
   // never awaited here, so the usage scan can never stall a rebuild.
   graph: ({ host, graph }) => {
     noteGraph(graph);
-    const snapshot = host.stores.jobs.snapshot();
+    const snapshot = host.stores.jobs.data;
     return { jobs: withRunStatus(withJobSpend(snapshot, spendFor(host).byCard(snapshot.jobs)), graph.sessions) };
   },
 

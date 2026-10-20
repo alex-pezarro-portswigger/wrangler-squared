@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import path from 'node:path';
+import { THEME_IDS, DEFAULT_THEME, migrateTheme } from '../public/theme-ids.js';
 
 export const line = z.string().trim().min(1).max(180).refine((s) => !/[\r\n]/.test(s), 'Use one short line');
 export const id = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
@@ -14,8 +15,55 @@ const folderPath = z.string().trim().min(1).max(1000).refine(
   (s) => !/[\r\n\0]/.test(s) && (path.isAbsolute(s) || s.startsWith('~/')),
   'Use an absolute folder path or ~/path',
 );
+// A plausible git branch name (git check-ref-format's common rules), never a flag or a ref path.
+export const branchName = z.string().trim().min(1).max(200).refine(
+  (s) => /^[A-Za-z0-9._/-]+$/.test(s) && !/^[-/]|[/.]$|\.\.|\/\/|\/\.|\.lock(\/|$)|^refs\//.test(s),
+  'Use a plausible git branch name such as next or release/2.x',
+);
 export const checksSchema = z.array(line).min(1).max(8);
 export const briefSchema = z.string().trim().min(1).max(500);
+// "Show me before review": things the agent must show working at the Code
+// checkpoint, written as things to see. Only a PR has a review step to show at.
+export const MAX_SHOW = 8;
+export const showSchema = z.array(line).max(MAX_SHOW);
+export const showKey = (s) => String(s).trim().replace(/\s+/g, ' ').toLowerCase();
+// Proof for one check of a `ready` receipt. A shot is a file the agent saved in
+// $JOB_EVIDENCE (a bare name; job-evidence.js checks the bytes) with, where the
+// agent knows it, where it was taken; a run is a command and what it printed;
+// couldNot is why an item could not be shown, drawn amber on the step.
+const evidenceFile = z.string().max(100).refine((n) => /^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:png|jpe?g|gif|webm)$/i.test(n), 'Name a PNG, JPEG, GIF or WebM file saved in $JOB_EVIDENCE (a file name, not a path)');
+const shotSchema = z.union([evidenceFile, z.object({ file: evidenceFile, url: z.string().trim().max(300).optional(), viewport: z.string().trim().max(40).optional(),
+  tool: z.string().trim().max(60).optional(), note: line.optional() }).strict()]);
+const runProofSchema = z.object({ cmd: z.string().trim().min(1).max(300), out: z.string().max(4000), exit: z.number().int() }).strict();
+export const proofSchema = z.object({ text: line, note: line.optional(), shots: z.array(shotSchema).min(1).max(4).optional(), run: runProofSchema.optional(),
+  couldNot: z.string().trim().min(1).max(400).refine((s) => !/[\r\n]/.test(s), 'Use one short line').optional() }).strict().superRefine((p, ctx) => {
+  const proofs = [p.shots, p.run, p.couldNot].filter(Boolean).length;
+  if (!proofs) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `"${p.text}": give shots, run or couldNot, or list it as a plain check` });
+  else if (p.couldNot && proofs > 1) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `"${p.text}": couldNot is the whole answer; it takes no shots or run` });
+});
+export const readyChecksSchema = z.array(z.union([line, proofSchema])).min(1).max(16);
+// What the agent left running for the human to try (docs: "See it working", PR 3).
+// The agent starts it (detached, so it outlives the session going dormant) and
+// says how to stop it; the extension never starts anything, it only tears down
+// what a receipt listed. `pid` is the group leader's, `stop` a command run in the
+// worktree (`docker compose -p x down`), `log` a file the agent redirected the
+// output to (read back for the Logs button, job-running.js).
+export const MAX_RUNNING = 6;
+export const runningItemSchema = z.object({
+  name: line,
+  url: z.string().trim().max(300).refine((u) => /^https?:\/\/[^\s]+$/i.test(u), 'url must be an http(s) address').optional(),
+  pid: z.number().int().min(2).max(4194304).optional(),
+  stop: z.string().trim().min(1).max(300).refine((s) => !/[\r\n]/.test(s), 'stop is one command on one line').optional(),
+  log: z.string().trim().max(400).refine((p) => p.startsWith('/') && !/[\r\n]/.test(p), 'log is an absolute file path').optional(),
+}).strict().refine((r) => r.url || r.pid || r.stop, 'A running entry needs a url, a pid or a stop command');
+export const runningSchema = z.array(runningItemSchema).max(MAX_RUNNING);
+export const checkText = (c) => typeof c === 'string' ? c : c.text;
+// Every Show me item must be answered by a proof check whose text is the item
+// (compared loosely: case and spacing). Returns the items left unanswered.
+export const unansweredShow = (show, checks) => {
+  const answered = new Set(checks.filter((c) => typeof c !== 'string').map((c) => showKey(c.text)));
+  return (show || []).filter((item) => !answered.has(showKey(item)));
+};
 // A sub-job is one of four kinds. A PR changes a repository. An agent session
 // runs on this machine in a scratch workspace and is finished when its receipt
 // is accepted. A human task is the rare step no agent can take at all (a click
@@ -73,8 +121,11 @@ export const writeActionSchema = z.object({ type: z.enum(WRITE_ACTIONS), to: lin
 export const triggerSchema = z.object({ sub: id, at: z.enum(MILESTONES) });
 export const subJobSchema = z.object({
   id, title: line, kind: z.enum(['pr', 'session', 'human', 'write']).default('pr'), repo: repoPath.optional(),
+  // A PR that lands somewhere other than the job's base (a backport, a release
+  // branch). Absent, it lands where the job does (`targetOf`).
+  base: branchName.optional(),
   storyId: id.optional(), jiraKey: jira.optional(), after: z.array(id).max(30).default([]),
-  brief: briefSchema.optional(), check: line.optional(),
+  brief: briefSchema.optional(), check: line.optional(), show: showSchema.optional(),
   // `on` is a session's: it starts once that sub-job reaches the milestone (and
   // its `after`s are satisfied). The rest is a write's own. `review` is
   // tri-state (`writeReviewed`): true or false is this write's own say, absent
@@ -100,6 +151,8 @@ export const writeReviewed = (job, sub) => sub?.review ?? job?.reviewWrites ?? f
 // A PR is the only kind with a repository, a pipeline and a deploy gate,
 // so "not a PR" — not "is a session" — is what every one of those rules turns on.
 export const isPrSub = (sub) => !isSessionSub(sub) && !isHumanSub(sub) && !isWriteSub(sub);
+// The branch a PR is cut from and lands on; null is the repository's default.
+export const targetOf = (job, sub) => sub?.base || job?.base || null;
 // The write that creates a story is what gives it a key, so it is the one
 // sub-job naming a keyless story that never waits for one.
 export const awaitsTicket = (sub) => !!sub?.storyId && !sub?.jiraKey && !isStoryCreate(sub);
@@ -114,6 +167,8 @@ export const writeRefs = (sub) => [...`${sub.action?.comment || ''} ${sub.action
 // PR. Off, one session does all of it. Read through this helper: a job created
 // before the flag existed has no field and reviews like a new one.
 export const reviewCode = (job) => job?.reviewCode ?? true;
+// Red steps: true (also what a job from before the flag reads) is "You decide".
+export const reviewRed = (job) => job?.reviewRed ?? true;
 // The one line every PR description and squash commit a job lands must end with.
 export const ATTRIBUTION = 'Made with Agent Wrangler and the charlie-ps/wrangler-squared extension';
 // A story either already exists in Jira (key) or is a proposal (no key, optional
@@ -127,7 +182,7 @@ export const ATTRIBUTION = 'Made with Agent Wrangler and the charlie-ps/wrangler
 // like any other (edit-write `story`), not with the plan.
 export const storyFieldSchema = z.object({ name: line, value: z.string().trim().min(1).max(2000) });
 // `dropped`: its create write was dropped before it had a key, so whatever named
-// it went ahead ticketless (job-moves.js `unlinkStory`); it stays as the record,
+// it went ahead ticketless (job-sub-ops.js `unlinkStory`); it stays as the record,
 // and nothing creates it again.
 export const storySchema = z.object({ id, key: jira.optional(), project: jiraProject.optional(), title: line,
   fields: z.array(storyFieldSchema).max(25).optional(), dropped: z.boolean().optional() });
@@ -187,7 +242,9 @@ export const planSchema = z.object({
     if (isSessionSub(s) && s.check) issue(`${s.id}: a session sub-job's receipt is its own check`);
     if (isHumanSub(s) && s.repo) issue(`${s.id}: a human sub-job has no repo`);
     if (isHumanSub(s) && s.check) issue(`${s.id}: a human sub-job has nothing to check after it lands`);
+    if (!isPrSub(s) && s.show?.length) issue(`${s.id}: only a PR sub-job has a review step to show things at (show)`);
     if (isPrSub(s) && !s.repo) issue(`${s.id}: a PR sub-job needs repo`);
+    if (s.base && !isPrSub(s)) issue(`${s.id}: only a PR lands on a branch (base)`);
     if (!isWriteSub(s) && !s.brief) issue(`${s.id}: brief is required`);
     if (!isWriteSub(s) && (s.action || s.by || s.place)) issue(`${s.id}: only a write has a place, an action or a session that makes it (by)`);
     if (s.on && isWriteSub(s)) issue(`${s.id}: a write is made by its session (by); put the milestone (on) on that session`);
@@ -324,7 +381,9 @@ function jiraRules(s, plan, issue) {
 export const MAX_IMAGES = 8;
 const imageName = z.string().regex(/^paste-\d{1,20}-[a-f0-9]{4,32}\.(?:png|jpg|gif|webp)$/);
 // The checkpoints a new job starts with when nobody chose: New job's original form.
-export const REVIEW_DEFAULTS = { reviewPlan: true, reviewCode: true, reviewMerge: true, reviewSessions: true, reviewWrites: false };
+// `reviewRed` is the sixth: true is "You decide" (a red step gets a fix proposed
+// and waits for you), false is "Wrangler replans" (job-red.js).
+export const REVIEW_DEFAULTS = { reviewPlan: true, reviewCode: true, reviewMerge: true, reviewSessions: true, reviewWrites: false, reviewRed: true };
 export const SANDBOX_MODES = ['locked', 'auto', 'full'];
 export const jobInputSchema = z.object({
   title: line.optional(), intent: z.string().trim().min(1).max(16000),
@@ -338,7 +397,14 @@ export const jobInputSchema = z.object({
   reviewPlan: z.boolean().optional(), reviewCode: z.boolean().optional(), reviewMerge: z.boolean().optional(), reviewSessions: z.boolean().optional(),
   // The default for a write with no `review` of its own (`writeReviewed`).
   reviewWrites: z.boolean().optional(),
-  updateMain: z.boolean().default(false), taskId: z.string().nullable().default(null),
+  // Red steps: true waits for you to decide each proposed fix, false lets Wrangler
+  // apply the safe ones (job-red.js).
+  reviewRed: z.boolean().optional(),
+  // The branch this job's PRs land on, when it is not the repository's default
+  // (an integration branch for multi-PR work). Absent on a job saved before it,
+  // and then everything keeps targeting the default.
+  base: branchName.optional(),
+  taskId: z.string().nullable().default(null),
   // Names of images the job keeps in the host's per-extension store (`images:keep`),
   // already staged by the client's `api.images.stage`. `shareImages` decides whether
   // sub-job sessions get them too; planning always does.
@@ -350,9 +416,12 @@ export const jobInputSchema = z.object({
   // (job-runtime.js writableDirsFor); ignored under Full access.
   writableDirs: z.array(folderPath).max(12).default([]),
 });
-export const settingsSchema = z.object({
+export const settingsSchema = z.preprocess(migrateTheme, z.object({
   concurrency: z.number().int().min(1).max(16).default(8),
   maxRepairs: z.number().int().min(0).max(5).default(2),
+  // Automatic replans of one red step before it is declared red to the human
+  // (job-red.js). 0 turns red handling off: a red step just waits, as it always did.
+  maxReplans: z.number().int().min(0).max(5).default(2),
   // How long a merged sub-job may wait for a post-merge workflow to show ANY run
   // on the merge commit before the board flags it (job-runner.js).
   deploymentStaleMinutes: z.number().int().min(5).max(1440).default(30),
@@ -361,22 +430,27 @@ export const settingsSchema = z.object({
   // (`open -na <ideApp> --args <path>`, server/handlers.js). An app NAME, not a
   // command: nothing typed here ever reaches a shell.
   ideApp: z.string().trim().min(1).max(120).default('IntelliJ IDEA'),
-  // What the board's plates are drawn over: each job's skyline or its launch-page
-  // scene (public/job-plates.js PLATE_ART). A hover mode, 'peek', was dropped and
-  // reads as the skyline.
-  plateArt: z.preprocess((v) => (v === 'peek' ? 'quiet' : v), z.enum(['quiet', 'full']).default('quiet')),
+  // Fast-forward the human's checkout of the default branch once a PR lands
+  // (job-main.js). It never blocks a sub-job, so it is on unless switched off.
+  updateMain: z.boolean().default(true),
+  // The Jobs view's look (public/themes.js), from the shared id list; settings saved
+  // before themes are migrated by migrateTheme (a `backdrop` and a top-level `plateArt`)
+  // onto the default, and a version-5 jobs.json's Space is reset once (job-store.js migrateJobs).
+  theme: z.enum(THEME_IDS).default(DEFAULT_THEME),
+  // Options that belong to one theme, kept per theme so switching away and back keeps
+  // them. Space's plate art: each job's skyline or its launch-page scene (job-plates.js PLATE_ART).
+  themeOptions: z.object({
+    space: z.object({ plateArt: z.enum(['quiet', 'full']).default('quiet') }).default({}),
+  }).default({}),
   // The agent/model/effort the last created job used: New job's picker opens on it
   // while the catalog still offers that model. Same bounds as the job's own fields.
   usualPick: z.object({
     agent: z.enum(['claude', 'codex']), model: z.string().max(150), effort: z.string().max(40).default(''),
   }).nullable().default(null),
   // What New job's checkpoints start on, and what a create_job that leaves one out
-  // gets. The board always sends all five: `settings(patch)` merges shallowly.
+  // gets. The board always sends all six: `settings(patch)` merges shallowly.
   reviewDefaults: z.object(Object.fromEntries(Object.entries(REVIEW_DEFAULTS).map(([f, v]) => [f, z.boolean().default(v)]))).default({}),
-});
-// A worker never changes the plan: `move` is a SUGGESTION on a blocked receipt,
-// which the board offers the human as the pre-selected button (job-moves.js).
-export const MOVE_NAMES = ['fix-here', 'split-out', 'new-ticket', 'reorder', 'drop', 'mark', 'accept-red'];
+}));
 // Strict, so a receipt carrying a field this system no longer has (an
 // `amendment`, a `commitMessage`) fails loudly with the offending key rather
 // than being silently stripped — the agent can then correct and retry, exactly
@@ -398,9 +472,35 @@ export const outputSchema = z.union([z.object({ id, url: placeLinkSchema, title:
 // being its channel or page.
 export const draftSchema = z.object({ id, text: commentSchema.optional(), title: line.optional(), to: line.optional(), comment: commentSchema.optional(),
   where: z.string().trim().min(1).max(500).refine((s) => !/[\r\n]/.test(s), 'Use one line').optional(), fields: z.array(storyFieldSchema).max(25).optional() }).strict();
+// What approving a plan change can DO beyond editing the plan (job-actions.js):
+// each acts on a live sub-job and is pinned by the server to the head, merge
+// commit, stage or review round it was written against. `evidence` is mandatory on a mark: the
+// PR or ticket that shows it is true. `fix` is the sub-job whose landing a
+// recover waits for.
+export const ACTION_TYPES = ['forward', 'rework', 'accept-red', 'mark', 'recover'];
+// A forward or rework note carries the human's own words, which run past one line.
+export const actionNoteSchema = z.string().trim().min(1).max(2000);
+export const actionSchema = z.object({ type: z.enum(ACTION_TYPES), sub: id, note: actionNoteSchema.optional(), position: z.enum(['merged', 'done']).optional(),
+  evidence: line.optional(), fix: id.optional() }).strict();
+export const MAX_OPTIONS = 3;
+export const diagnosisSchema = z.object({ summary: z.string().trim().min(1).max(1200),
+  evidence: z.array(z.object({ label: line, detail: line }).strict()).max(6).optional() }).strict();
+// Up to three ranked options: the receipt's own plan is the first (recommended),
+// `alternatives` are the rest. Each is a whole plan plus the actions it carries.
+const optionShape = { label: line, why: z.string().trim().max(400).optional(), actions: z.array(actionSchema).max(6).optional() };
+export const alternativeSchema = z.object({ ...optionShape, plan: planSchema }).strict();
+// A job the idea's planner offers: what the human creates with one press, and
+// exactly the plan receipt it would otherwise have sent (job-idea.js acceptIdea).
+export const suggestionSchema = z.object({ title: line, plan: planSchema }).strict();
 export const reportSchema = z.discriminatedUnion('kind', [
-  receipt({ kind: z.literal('plan'), plan: planSchema }),
-  receipt({ kind: z.literal('ready'), checks: checksSchema }),
+  receipt({ kind: z.literal('plan'), plan: planSchema, ...optionShape, label: line.optional(), diagnosis: diagnosisSchema.optional(),
+    alternatives: z.array(alternativeSchema).max(MAX_OPTIONS - 1).optional() }),
+  receipt({ kind: z.literal('ready'), checks: readyChecksSchema, running: runningSchema.optional() }),
+  // Answers a human who wrote to a session parked on its ready receipt (job-store.js):
+  // the run stays parked, the tree and the round unchanged. From a new idea's planner
+  // it is a turn in the conversation instead (job-idea.js), and may suggest a job.
+  receipt({ kind: z.literal('reply'), text: z.string().trim().min(1).max(4000), shots: z.array(shotSchema).min(1).max(4).optional(), run: runProofSchema.optional(), running: runningSchema.optional(),
+    suggest: suggestionSchema.optional() }),
   receipt({ kind: z.literal('published'), url: prUrlSchema }),
   receipt({ kind: z.literal('repaired'), changes: checksSchema, checks: checksSchema }),
   receipt({ kind: z.literal('deployed'), checks: checksSchema }),
@@ -408,5 +508,12 @@ export const reportSchema = z.discriminatedUnion('kind', [
   receipt({ kind: z.literal('completed'), checks: checksSchema, writes: z.array(writeResultSchema).max(50).optional(), outputs: z.array(outputSchema).max(30).optional() }),
   // Mid-run, not the end of it: the session waits for mail with the human's decisions.
   receipt({ kind: z.literal('drafts'), drafts: z.array(draftSchema).min(1).max(50) }),
-  receipt({ kind: z.literal('blocked'), summary: line, move: z.enum(MOVE_NAMES).optional() }),
+  // Up one level, never to the human first: `blocked` and `replan` hand a step
+  // that cannot go on to the planner (job-red.js), `escalate` declares it red to
+  // the human with what was found, what was tried and the decision it needs. Only
+  // the planner's escalation can carry options, which open in the proposal view.
+  receipt({ kind: z.literal('blocked'), summary: line }),
+  receipt({ kind: z.literal('replan'), summary: line, why: z.string().trim().min(1).max(1200).optional() }),
+  receipt({ kind: z.literal('escalate'), summary: z.string().trim().min(1).max(1200), tried: z.array(line).max(6).optional(), ask: line,
+    sub: id.optional(), options: z.array(alternativeSchema).max(MAX_OPTIONS).optional() }),
 ]);

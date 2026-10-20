@@ -1,8 +1,10 @@
 import { initJobsView } from './jobs-view.js';
-import { jobCards, jobNeedsReview } from './jobs.js';
+import { jobNeedsYou } from './job-state.js';
 import { diffReturnTarget } from './diff-return.js';
 import { createIntro } from './intro.js';
 import { createUpdates } from './updates.js';
+import { ICONS } from './icons.js';
+import { closeOnBackdrop } from './dialog-backdrop.js';
 
 // The client half: one `view` slot contribution (agent-wrangler public/slots.js),
 // which the board draws a rail button, a `#view=ext:jobs:board` route and a
@@ -25,9 +27,9 @@ import { createUpdates } from './updates.js';
 //  - `getAgents()` read the board's connect-time `agents` list → `api.agents()`
 //    (host api 1.25), the same live-catalog list, read each time New job opens.
 
-const ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16M5 8h2M11 11h2M17 8h2"/></svg>';
-
 const TOAST_MS = 3000;
+// A failure is read, not glanced at: it stays until closed or this long.
+const ERROR_TOAST_MS = 10000;
 
 // This view's route (agent-wrangler app.js extViewKey). Setting the hash is how
 // the diff round trip gets back here: the api can show the grid but no other view.
@@ -47,19 +49,37 @@ export default {
 
     // One toast element at a time, inside the view's own host: the board exposes
     // no toast to an extension, and a host that is display:none while another
-    // view is active hides it for free. textContent, never innerHTML — anything
-    // a frame carries is agent-written.
-    function toast(text) {
+    // view is active hides it for free (a top-layer element is still not drawn
+    // under a display:none ancestor). Inside #jobs so it wears the theme's
+    // scheme. A manual popover puts it in the top layer, above a modal detail,
+    // intro or updates dialog and its backdrop, which a z-index never can.
+    // textContent, never innerHTML — anything a frame carries is agent-written.
+    function toast(text, { error = false } = {}) {
       if (!viewHost) return;
       clearTimeout(toastTimer);
       viewHost.querySelector('.jobs-toast')?.remove();
       const el = document.createElement('div');
-      el.className = 'jobs-toast';
-      el.setAttribute('role', 'status');
-      el.textContent = text;
-      viewHost.appendChild(el);
-      toastTimer = setTimeout(() => el.remove(), TOAST_MS);
+      el.className = error ? 'jobs-toast jobs-toast-error' : 'jobs-toast';
+      el.setAttribute('role', error ? 'alert' : 'status');
+      el.setAttribute('popover', 'manual');
+      const body = document.createElement('span');
+      body.textContent = text;
+      el.appendChild(body);
+      const dismiss = () => { clearTimeout(toastTimer); el.remove(); };
+      if (error) {
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'jobs-toast-close';
+        close.setAttribute('aria-label', 'Dismiss');
+        close.innerHTML = ICONS.x;
+        close.onclick = dismiss;
+        el.appendChild(close);
+      }
+      (viewHost.querySelector('#jobs') || viewHost).appendChild(el);
+      try { el.showPopover?.(); } catch {}
+      toastTimer = setTimeout(dismiss, error ? ERROR_TOAST_MS : TOAST_MS);
     }
+    const toastError = (text) => toast(text, { error: true });
 
     // Core disarmed the trip when the reader left the grid or picked another
     // card, BEFORE either closed the panel. onClose fires inside those same
@@ -91,22 +111,27 @@ export default {
     slots.onMessage?.((msg) => {
       if (msg.event === 'job-created') {
         view?.created(msg);
-        toast(msg.started ? 'Job started — planning' : 'Job added to backlog');
+        toast(msg.started ? (msg.idea ? 'Idea sent to the planner' : 'Job started — planning') : msg.idea ? 'Idea added to backlog' : 'Job added to backlog');
       } else if (msg.event === 'job-create-failed') {
-        toast(msg.error);
+        toastError(msg.error);
       } else if (msg.event === 'job-action-complete') {
         view?.created(msg);
-        // A checkpoint switch says what it did in the footer it was made from.
-        if (msg.action !== 'set-review') toast('Job updated');
+        // A checkpoint switch says what it did in the footer it was made from, an idea in its own bubble.
+        if (msg.action === 'accept-idea') toast('Job created from the idea');
+        else if (!['set-review', 'request-change', 'idea-reply'].includes(msg.action)) toast('Job updated');
       } else if (msg.event === 'job-action-failed') {
         if (msg.action === 'set-review') view?.reviewFailed(msg);
-        else toast(msg.error);
+        else if (!(msg.action === 'request-change' && view?.changeFailed(msg))) { view?.ideaFailed(msg); toastError(msg.error); }
       } else if (msg.event === 'job-images') {
         view?.images(msg);
+      } else if (msg.event === 'job-evidence') {
+        view?.evidence(msg);
+      } else if (msg.event === 'job-running-log') {
+        view?.runningLog(msg);
       } else if (msg.event === 'job-ide-opened') {
         toast(`Opened in ${msg.app}`);
       } else if (msg.event === 'job-ide-failed') {
-        toast(msg.error);
+        toastError(msg.error);
       } else if (msg.event?.startsWith('feature-request-')) {
         view?.idea(msg);
       }
@@ -146,19 +171,20 @@ export default {
     slots.register('view', {
       id: 'board',
       label: 'Jobs',
-      icon: ICON,
+      icon: ICONS.jobs,
       mount(el, api) {
         // jobs-view.js finds both by id, as it did in core's index.html. The
         // dialog goes on <body>, not in the host: a <dialog> under a display:none
         // ancestor cannot showModal(), and the host is hidden whenever another
         // view is active.
-        el.innerHTML = '<section id="jobs" aria-label="Automated jobs"></section>';
+        el.innerHTML = '<section id="jobs" aria-label="Wrangler²"></section>';
         viewHost = el;
         dialog = document.createElement('dialog');
         dialog.id = 'job-dialog';
         dialog.className = 'job-dialog';
         dialog.setAttribute('aria-label', 'Job details');
         document.body.appendChild(dialog);
+        closeOnBackdrop(dialog);
         view = initJobsView({
           send: api.send,
           stageImage: (file) => api.images.stage(file),
@@ -169,9 +195,14 @@ export default {
           // off it → "Restore session" and openSession resumes it first.
           onBoard: (sid) => sessions.some((s) => s.sessionId === sid),
           onSession: (sid) => api.openSession(sid),
+          files: api.files,
+          onOpenFile: (path) => api.openFile(path),
           onDiff: (sid, from) => reviewDiff(api, sid, from),
           onIntro: () => intro.open(0),
           updates,
+          storage: api.storage,
+          toast,
+          toastError,
         });
         if (newJobOnMount) { newJobOnMount = false; view.newJob(); }
       },
@@ -186,7 +217,7 @@ export default {
         // from any view. Counted here rather than inside badge() because this
         // is the only place the graph is handed to us, and core reads the badge
         // in the same syncHosts pass that has just called update.
-        needsMe = jobCards(graph.jobs.jobs).filter((c) => jobNeedsReview(c.job, c.sub)).length;
+        needsMe = graph.jobs.jobs.filter(jobNeedsYou).length;
         if (!view) return;
         view.update(graph.jobs);
       },

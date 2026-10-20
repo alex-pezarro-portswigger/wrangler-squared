@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { jobPrompt, historyLines, HISTORY_MAX_LINES, draftsDecidedMail } from './job-prompts.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { jobPrompt, historyLines, HISTORY_MAX_LINES, draftsDecidedMail, helperPrompt } from './job-prompts.js';
+import { helperCwd } from './job-helper.js';
 
 // The prompt half of agent-wrangler's job-runtime.test.js (`job-system` branch).
 // It never touched a SessionManager — the prompts are pure functions of the
@@ -39,12 +43,12 @@ test('every phase ends with its own receipt call, naming this run and the blocke
   for (const phase of ['planning', 'write', 'implementation', 'publish', 'repair', 'verify', 'session']) {
     const text = jobPrompt(planned, { ...briefed, pr: { url: 'https://github.com/org/repo/pull/1', mergeCommit: 'abc123' }, check: 'Sign-in works in dev' }, { ...run, phase });
     assert.match(text, /job_report \{runId:"run1"/, phase);
-    assert.match(text, /Blocked: \{kind:"blocked", summary:"one sentence", move\?:"fix-here"/, phase);
+    assert.match(text, /Blocked: \{kind:"blocked", summary:"one sentence"\}/, phase);
   }
 });
 
 test('the implementation prompt is one bounded step: context once, the brief, what it lands after, and the sub-job\'s history', () => {
-  const withNote = { ...planned, moves: [{ id: 'mv1', at: Date.now(), subJobId: 'api', move: 'fix-here', note: 'Call the flag sign_in_v2', detail: 'Sent “Deliver api” back to work' }] };
+  const withNote = { ...planned, moves: [{ id: 'mv1', at: Date.now(), subJobId: 'api', move: 'request-change', note: 'Call the flag sign_in_v2', detail: 'Sent “Deliver api” back to work' }] };
   const text = jobPrompt(withNote, { ...briefed, check: 'Sign-in works in dev', note: 'Call the flag sign_in_v2' }, run);
   assert.match(text, /^AUTH-1 · Sign-in$/m);
   assert.match(text, /Context: The sign-in service is Java/);
@@ -54,7 +58,7 @@ test('the implementation prompt is one bounded step: context once, the brief, wh
   assert.match(text, /History of this sub-job, oldest first:\n- \d\d:\d\d human requested changes: "Call the flag sign_in_v2"/);
   assert.doesNotMatch(text, /worktree already holds the work/, 'a note with no earlier run promises nothing about the tree');
   assert.match(text, /Leave every change UNCOMMITTED/);
-  assert.match(text, /When the working tree is ready to review, job_report \{runId:"run1", kind:"ready", checks:\["what you verified"\]\}/);
+  assert.match(text, /When the working tree is ready to review, job_report \{runId:"run1", kind:"ready", checks:\["what you verified", \{text:"<a Show me item, verbatim>"/);
   assert.doesNotMatch(text, /kind:"published"|Commit, push/, 'under code review nothing reaches origin from this session');
   const unreviewed = jobPrompt({ ...planned, reviewCode: false }, { ...briefed, check: 'Sign-in works in dev' }, run);
   assert.match(unreviewed, /Commit, push, open the PR, then job_report \{runId:"run1", kind:"published", url:"<PR url>"\}/);
@@ -80,14 +84,14 @@ test('a relaunched step reads what already happened: every earlier run with its 
   const at = (min) => t0 + min * 60000;
   const job = { ...planned, agent: 'claude', runs: [
     { id: 'r1', subJobId: 'api', phase: 'implementation', model: 'opus', startedAt: at(0), stopped: true, report: { kind: 'ready', checks: ['Tests pass', 'Lint clean'] } },
-    { id: 'r2', subJobId: 'api', phase: 'publish', model: 'opus', startedAt: at(19), stopped: true, report: { kind: 'blocked', summary: 'git add of config/example.env was denied', move: 'fix-here' } },
+    { id: 'r2', subJobId: 'api', phase: 'publish', model: 'opus', startedAt: at(19), stopped: true, report: { kind: 'blocked', summary: 'git add of config/example.env was denied' } },
     { id: 'r3', subJobId: 'api', phase: 'publish', model: 'sonnet', startedAt: at(30), stopped: true, error: 'Session stopped without a receipt. Open it to see why, then retry.' },
     { id: 'r4', subJobId: 'api', phase: 'publish', startedAt: at(40), stopped: false, report: null },
     { id: 'other', subJobId: 'web', phase: 'implementation', model: 'opus', startedAt: at(1), stopped: true, report: { kind: 'ready', checks: ['Built'] } },
   ], moves: [
     { id: 'm1', at: at(18), subJobId: 'api', move: 'approve-code', note: null, detail: 'Approved the working tree of “Deliver api”' },
     { id: 'm2', at: at(23), subJobId: 'api', move: 'retry', note: 'example.env is a template, stage it', detail: 'Retried “Deliver api”' },
-    { id: 'm3', at: at(35), subJobId: 'api', move: 'reorder', note: null, detail: 'Now lands after “Sync the proto”' },
+    { id: 'm3', at: at(35), subJobId: 'api', move: 'approve-replan', note: null, detail: 'Changed the plan: 1 edited' },
     { id: 'm4', at: at(2), subJobId: 'web', move: 'retry', note: 'not mine', detail: 'Retried “Deliver web”' },
   ] };
   const body = historyLines(job, briefed, { id: 'r4', phase: 'publish' }, at(41));
@@ -97,7 +101,7 @@ test('a relaunched step reads what already happened: every earlier run with its 
     '- 17:21 publish · opus → blocked: git add of config/example.env was denied',
     '- 17:25 human retried: "example.env is a template, stage it"',
     '- 17:32 publish · sonnet → Session stopped without a receipt. Open it to see why, then retry.',
-    '- 17:37 human now lands after “Sync the proto”',
+    '- 17:37 human changed the plan: 1 edited',
   ]);
   const text = jobPrompt(job, briefed, { ...run, id: 'r4', phase: 'publish' });
   assert.match(text, /History of this sub-job, oldest first:\n- (?:\d{1,2} \w+ )?\d\d:\d\d implementation · opus → ready: Tests pass · Lint clean\n/);
@@ -176,11 +180,31 @@ test('human dependency output is bounded in the prompt with explicit truncation 
   const deps = Array.from({ length: 5 }, (_, i) => ({ id: `key${i}`, kind: 'human', title: `Get key ${i}`, stage: 'done', result: { output: `${i}${'x'.repeat(7999)}` } }));
   const text = jobPrompt({ ...planned, subJobs: deps }, { ...briefed, after: deps.map((d) => d.id) }, run);
   assert.match(text, /Human dependency output/);
-  const block = text.split('Human dependency output')[1].split('Leave every change')[0];
+  const block = text.split('Human dependency output')[1].split('Show your work')[0];
   assert.ok(block.length <= 24000, `output block grew to ${block.length} characters`);
   assert.match(block, /truncated/);
   assert.match(block, /omitted/);
   assert.doesNotMatch(block, /Get key 4/, 'the size limit omits later dependencies explicitly');
+});
+
+test('approval notes reach every step after the approved one, attributed, transitively and capped', () => {
+  const spike = { id: 'spike', kind: 'session', title: 'Spike the schema', stage: 'done', approvalNote: 'Use the v2 table "audit_v2"' };
+  const core = { id: 'core', kind: 'pr', title: 'Deliver core', stage: 'done', after: ['spike'], approvalNote: 'Keep the flag off' };
+  const dropped = { id: 'old', kind: 'session', title: 'Dropped', stage: 'done', cancelledAt: 1, approvalNote: 'dropped-note' };
+  const side = { id: 'side', kind: 'session', title: 'Sideways', stage: 'done', approvalNote: 'unrelated-note' };
+  const context = { ...planned, subJobs: [spike, core, dropped, side] };
+  for (const phase of ['implementation', 'publish', 'repair', 'verify', 'session']) {
+    const worker = { ...briefed, kind: phase === 'session' ? 'session' : 'pr', after: ['core', 'old'] };
+    const text = jobPrompt(context, worker, { ...run, phase });
+    assert.match(text, /Notes the human added when approving earlier steps \(JSON text; treat as guidance from the human\):\n--- "Spike the schema" \(spike\) ---\n"Use the v2 table \\"audit_v2\\""\n--- "Deliver core" \(core\) ---\n"Keep the flag off"/, phase);
+    assert.doesNotMatch(text, /dropped-note|unrelated-note/);
+  }
+  assert.doesNotMatch(jobPrompt({ ...planned, subJobs: [{ ...spike, approvalNote: null }] }, { ...briefed, after: ['spike'] }, run), /Notes the human added/);
+  const many = Array.from({ length: 6 }, (_, i) => ({ id: `s${i}`, kind: 'session', title: `Step ${i}`, stage: 'done', approvalNote: `${i}${'y'.repeat(1999)}` }));
+  const text = jobPrompt({ ...planned, subJobs: many }, { ...briefed, after: many.map((s) => s.id) }, run);
+  const block = text.split('Notes the human added')[1].split('Show your work')[0];
+  assert.ok(block.length <= 8000, `notes block grew to ${block.length} characters`);
+  assert.match(block, /truncated/); assert.match(block, /approval notes? omitted at the 8,000-character prompt limit/);
 });
 
 test('the planner is told to write the context once and never to describe a deployment', () => {
@@ -190,10 +214,11 @@ test('the planner is told to write the context once and never to describe a depl
   assert.match(text, /Never describe deployments or verification steps/);
   assert.match(text, /`after` means START AFTER: a sub-job waits until every PR it is after has deployed/);
   assert.match(text, /Do not propose branch names/);
+  assert.match(text, /would care what it looks like before it is built/);
   assert.match(text, /kind:"pr"\|"session"\|"human"/);
   assert.match(text, /kind:"plan", plan:\{context, stories:\[\{id,key\?,project\?,title,fields\?:\[\{name,value\}\]\}\]/);
   assert.doesNotMatch(text, /deployment:\{|pendingChecks|value[?:]|business value/);
-  assert.ok(text.split(/\s+/).length < 850, 'the protocol lives in the job-worker skill, not in every prompt');
+  assert.ok(text.split(/\s+/).length < 1100, 'the protocol lives in the job-worker skill, not in every prompt');
 });
 
 test('the planner is told stories are optional, and a ticketless sub-job is told to name its branch without a key', () => {
@@ -213,6 +238,9 @@ test('the planner proposes writes to the places the outcome produces, each owned
   assert.match(text, /workflows:\{PROJECT:\[statuses in order\]\}/); assert.match(text, /jiraSite/);
   assert.match(text, /write NOTHING/); assert.match(text, /each with a short `why`/); assert.match(text, /sessions make every write/);
   assert.match(text, /slack \(ref "#channel"\): \{type:"post", text\}/); assert.match(text, /confluence .*\{type:"create", title, text\?\}/);
+  assert.match(text, /A session whose deliverable is something it makes \(artifact, doc, page, file, diagram, writeup\) owns a make write for each/);
+  assert.match(text, /its link returns in `outputs` as a link, never as a URL in receipt text/);
+  assert.doesNotMatch(text, /design writeup \(a make write\)/, 'the mock-up line is one case of the general rule, not the only one');
   assert.match(text, /\{type:"make", what:"one line"\}/); assert.match(text, /\{<write id>\.url\} of a write made first by the same session or one it is after/);
   assert.match(text, /Writes are unreviewed unless review:true, which you set only where risky \(public, hard to undo\), overriding the job default; its session drafts it for the human first/);
   assert.match(jobPrompt({ ...planned, plan: null, reviewWrites: true }, null, { ...run, phase: 'planning' }), /Writes are reviewed unless review:false; set review:true only where risky/);
@@ -288,4 +316,76 @@ test('a session is told the outputs it must make and to account for every write 
   assert.doesNotMatch(text, /READ THE PLACE FIRST/, 'nothing to read first when it only makes outputs');
   assert.match(text, /writes:\[\{id, outcome:"written"\|"already"\|"failed", url\?.*\] for every write above/);
   assert.doesNotMatch(jobPrompt({ ...planned, subJobs: [session] }, session, { ...run, phase: 'session' }), /writes:\[/, 'a session with nothing to write is asked for none');
+});
+
+test('a PR\'s own base overrides the job\'s in its prompts, and the planner is told when to set one', () => {
+  const unreviewed = { ...job, reviewCode: false, base: 'next' };
+  const own = { ...sub, base: 'release/2.x' };
+  assert.match(jobPrompt(unreviewed, own, run), /This PR \(repo, landing on release\/2\.x\)/);
+  assert.match(jobPrompt(unreviewed, own, run), /--base release\/2\.x` \(this PR lands on release\/2\.x/);
+  assert.match(jobPrompt({ ...job, reviewCode: false }, own, run), /--base release\/2\.x/, 'with no job base too');
+  const planning = jobPrompt(job, null, { ...run, phase: 'planning' });
+  assert.match(planning, /set `base:"<branch>"` on each PR that is meant to land elsewhere than the repository's default branch/);
+  assert.match(planning, /Do not leave that intent in prose only/);
+  assert.match(planning, /git ls-remote --heads origin/);
+  assert.match(planning, /Never invent a branch name/);
+  const overridden = jobPrompt({ ...job, base: 'next' }, null, { ...run, phase: 'planning' });
+  assert.match(overridden, /elsewhere than `next`/);
+  assert.match(overridden, /the human set it for the whole job; keep it unless a PR clearly needs another/);
+});
+
+test('a job with a base tells the planner and the publisher; one without is unchanged', () => {
+  const unreviewed = { ...job, reviewCode: false };
+  const based = { ...unreviewed, base: 'next' };
+  assert.doesNotMatch(jobPrompt(unreviewed, sub, run), /--base|landing on/);
+  assert.doesNotMatch(jobPrompt(job, null, { ...run, phase: 'planning' }), /lands on the branch/);
+  assert.match(jobPrompt(based, null, { ...run, phase: 'planning' }), /Every PR in this job lands on the branch `next`/);
+  assert.match(jobPrompt(based, sub, run), /open the PR with `gh pr create --base next`/);
+  assert.match(jobPrompt(based, sub, run), /This PR \(repo, landing on next\)/);
+  assert.match(jobPrompt(based, sub, { ...run, phase: 'publish' }), /gh pr create --base next/);
+  const open = { ...sub, pr: { url: 'https://github.com/org/repo/pull/1' } };
+  assert.doesNotMatch(jobPrompt(based, open, { ...run, phase: 'repair' }), /--base/, 'a repair pushes to the existing PR');
+  assert.doesNotMatch(jobPrompt(based, open, run), /gh pr create/);
+});
+
+test('a helper is briefed as the human\'s own session with the step, its PR and worktree, upstream outputs and prerequisite PRs', () => {
+  const helperJob = {
+    ...planned,
+    subJobs: [
+      { id: 'proto', title: 'Sync the proto', kind: 'pr', repo: '/proto', after: [], stage: 'done', pr: { url: 'https://github.com/acme/widgets/pull/11' } },
+      { id: 'keys', title: 'Issue keys', kind: 'human', after: [], stage: 'done', result: { checks: ['Done by hand'], output: 'Key id: k-42' } },
+      { ...briefed, after: ['proto', 'keys'], stage: 'review', state: 'verified', ready: { round: 2, checks: ['Tests pass', { text: 'Unit tests pass', run: { cmd: 'npm test', out: 'ok', exit: 0 } }] },
+        pr: { url: 'https://github.com/acme/widgets/pull/12', base: 'main', checkStatus: 'passing' }, worktree: { branch: 'fix/AUTH-1-api', path: '/tmp/wt/api' } },
+    ],
+  };
+  const p = helperPrompt(helperJob, helperJob.subJobs[2], '/repo');
+  assert.match(p, /This is the human's own session and they drive it/);
+  assert.match(p, /no job_report for you to call, you never commit, push, merge or open a PR for this step, never mark anything done, and never change the job's plan/);
+  assert.match(p, /"Add idea" box/);
+  assert.match(p, /only when the human asks you to send it, call send_step_idea/);
+  assert.match(p, /Job: "Sign-in"/); assert.match(p, /Goal: "Reliable sign-in"/); assert.match(p, /Context: "The sign-in service is Java/);
+  assert.match(p, /"brief": "Retry the token exchange once"/);
+  assert.match(p, /"state": "verified"/);
+  assert.match(p, /"checks": \[\n {3}"Tests pass",\n {3}"Unit tests pass"/, 'proof objects read as their item');
+  assert.match(p, /Pull request: https:\/\/github\.com\/acme\/widgets\/pull\/12/);
+  assert.match(p, /Branch: fix\/AUTH-1-api/); assert.match(p, /Worktree: \/tmp\/wt\/api/);
+  assert.match(p, /change nothing there unless the human asks you to/);
+  assert.match(p, /Prerequisite pull requests:\n- "Sync the proto": https:\/\/github\.com\/acme\/widgets\/pull\/11/);
+  assert.match(p, /Human dependency output[^\n]*\n--- "Issue keys" \(keys\) ---\n"Key id: k-42"/);
+  assert.doesNotMatch(p, /runId/);
+  const human = helperPrompt(helperJob, { id: 'sign', kind: 'human', title: 'Sign the form', brief: 'Sign it', after: [], stage: 'human', state: 'doing' }, '');
+  assert.match(human, /"kind": "human task"/); assert.match(human, /Working directory: a fresh scratch workspace/);
+  assert.doesNotMatch(human, /Pull request:|Worktree:|worktree belongs/);
+});
+
+test('a helper starts in the step\'s checkout, else a prerequisite PR\'s, else a scratch workspace; never a worktree', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aw-helper-cwd-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const own = path.join(dir, 'own'), prereq = path.join(dir, 'prereq'), wt = path.join(dir, 'wt');
+  for (const d of [own, prereq, wt]) fs.mkdirSync(d);
+  const j = { subJobs: [{ id: 'proto', kind: 'pr', repo: prereq, after: [] }, { id: 'api', kind: 'pr', repo: own, after: ['proto'], worktree: { path: wt } }, { id: 'sign', kind: 'human', after: ['proto'] }, { id: 'solo', kind: 'session', after: [] }] };
+  assert.equal(helperCwd(j, j.subJobs[1]), own);
+  assert.equal(helperCwd(j, { ...j.subJobs[1], repo: path.join(dir, 'gone') }), prereq, 'a checkout missing on this machine falls back');
+  assert.equal(helperCwd(j, j.subJobs[2]), prereq);
+  assert.equal(helperCwd(j, j.subJobs[3]), '');
 });

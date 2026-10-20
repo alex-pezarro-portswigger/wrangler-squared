@@ -1,5 +1,5 @@
 import { ICONS } from './icons.js';
-import { isPrSub, isSessionSub, isHumanSub, isWriteSub, writeWaiting, triggerDropped, replanPending, replanProposed, heldByReplan, jobStatus, jobNeedsReview, eventFor, redPipeline, cancelledDependencies, pendingDependencies, deploymentStalled, codeAwaitingReview, runStatus, prNumber } from './jobs.js';
+import { isPrSub, isSessionSub, isHumanSub, isWriteSub, writeWaiting, triggerDropped, replanPending, replanProposed, heldByReplan, redFixing, redFixReady, redDeclared, jobStatus, jobNeedsReview, eventFor, redPipeline, cancelledDependencies, pendingDependencies, deploymentStalled, codeAwaitingReview, runStatus, prNumber, worktreeKept, promptsWaiting } from './jobs.js';
 
 // The one state vocabulary every surface draws: a tone (the colour, see the
 // .tone-* rules in jobs.css), a glyph and a short name. Every stage, run status,
@@ -24,8 +24,11 @@ export const stateSolid = (state) => !['planned', 'queued', 'waiting', 'dropped'
 // A plan's sub-jobs have no stage until approval makes them live.
 export function subState(job, sub) {
   if (!sub.stage) return 'planned';
-  if (sub.cancelledAt) return 'dropped';
+  if (sub.cancelledAt) return worktreeKept(sub) ? 'needs' : 'dropped';
   if (sub.stage === 'done') return 'done';
+  // Red, but Wrangler has it (Fixing), or has a fix for you (Fix ready): neither is the failing red you act on.
+  if (!job.error && redFixing(job, sub)) return 'running';
+  if (!job.error && redFixReady(job, sub)) return 'needs';
   if (job.error || cancelledDependencies(job, sub).length || (eventFor(job, sub) && !deploymentStalled(sub))) return 'failing';
   if (job.paused || heldByReplan(job, sub)) return 'paused';
   if (jobNeedsReview(job, sub)) return 'needs';
@@ -36,7 +39,7 @@ export function subState(job, sub) {
 }
 
 export function jobState(job) {
-  if (job.cancelledAt) return 'dropped';
+  if (job.cancelledAt) return job.subJobs.some((s) => s.cancelledAt && worktreeKept(s)) ? 'needs' : 'dropped';
   if (job.error) return 'failing';
   if (job.stage === 'done') return 'done';
   if (job.stage !== 'active') {
@@ -55,6 +58,12 @@ export function jobState(job) {
   return STATE_ORDER.find((s) => states.includes(s));
 }
 
+// A local checkout main could not be fast-forwarded (job-main.js), and nothing is fixing it yet:
+// an ask of its own beside the stage roll-up, which it never changes, so a finished job keeps it.
+export const mainWaiting = (job) => (job.mainNotices || []).filter((n) => !n.retrying && !n.resolving);
+// A job needs you exactly when its plate draws an ask (job-plates.js plateAsk): the rail
+// badge and the Needs you tab count jobs by this, so both match the cards on the board.
+export const jobNeedsYou = (job) => !!job.error || promptsWaiting(job).length > 0 || ['needs', 'failing'].includes(jobState(job)) || mainWaiting(job).length > 0;
 export const leadSub = (job, state = jobState(job)) => job.subJobs.find((s) => subState(job, s) === state) || null;
 const redChecks = (sub) => (sub.pr?.checks || []).filter((c) => ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT'].includes(c.state)).length;
 // A few words for what a sub-job is waiting for, where its state is one a human
@@ -63,12 +72,15 @@ export function subLabel(job, sub) {
   const state = subState(job, sub);
   const n = prNumber(sub);
   if (state === 'failing') {
+    if (redDeclared(job, sub) && !job.error) return 'Declared red';
     if (cancelledDependencies(job, sub).length) return triggerDropped(job, sub) ? 'Trigger dropped' : 'Prerequisite dropped';
     if (sub.error || eventFor(job, sub)) return eventFor(job, sub).title;
     if (job.error) return 'Needs attention';
     return redPipeline(sub) === 'checks' ? 'Checks failing' : 'Deploy failing';
   }
   if (state === 'needs') {
+    if (sub.cancelledAt) return jobStatus(job, sub).text;
+    if (redFixReady(job, sub)) return 'Fix ready';
     if (runStatus(job, sub) === 'needs-you') return 'Prompt waiting';
     if (deploymentStalled(sub)) return 'Nothing deployed';
     if (codeAwaitingReview(sub)) return 'Review code';
@@ -82,7 +94,7 @@ export function subLabel(job, sub) {
 // The one coloured line under a stepper node: the PR it is, and how it stands.
 export function subLine(job, sub) {
   const n = isPrSub(sub) ? prNumber(sub) : '';
-  const red = subState(job, sub) === 'failing' && redPipeline(sub) === 'checks' ? redChecks(sub) : 0;
+  const red = subState(job, sub) === 'failing' && redPipeline(sub) === 'checks' && !redDeclared(job, sub) ? redChecks(sub) : 0;
   const text = red ? `${red} check${red === 1 ? '' : 's'} red` : subLabel(job, sub);
   return n && !text.includes(`#${n}`) ? `#${n} · ${text}` : text;
 }
@@ -90,14 +102,16 @@ export function jobLabel(job) {
   const state = jobState(job);
   if (job.cancelledAt) return jobStatus(job, null).text;
   if (job.error) return 'Needs attention';
+  if (!['needs', 'failing'].includes(state) && mainWaiting(job).length) return `Local ${mainWaiting(job)[0].base} behind`;
   if (job.stage === 'backlog') return job.paused ? 'Paused' : 'Backlog';
   if (job.stage === 'planning' && state === 'needs' && job.plan && !runStatus(job, null)) return 'Plan ready';
   if (job.stage !== 'active') return jobStatus(job, null).text;
   if (state === 'done') return 'Delivered';
   if (state === 'paused') return 'Paused';
-  if (state === 'needs' && replanProposed(job)) return 'Plan change ready';
-  if (state === 'running' && replanPending(job) && !replanProposed(job)) return 'Re-planning';
+  if (state === 'needs' && replanProposed(job) && !job.replan.red) return 'Plan change ready';
+  if (state === 'running' && replanPending(job) && !replanProposed(job)) return job.replan.red ? 'Fixing' : 'Re-planning';
   const peers = job.subJobs.filter((s) => subState(job, s) === state);
+  if (!peers.length) return jobStatus(job, null).text;
   return `${subLabel(job, peers[0])}${peers.length > 1 ? ` +${peers.length - 1}` : ''}`;
 }
 export const sortJobs = (jobs) => jobs.map((job, i) => [job, job.createdAt ?? 0, i]).sort((a, b) => b[1] - a[1] || b[2] - a[2]).map(([job]) => job);

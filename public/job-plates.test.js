@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assignScenes, plateAsk, plateHtml, placePopHtml, levelOf, inkFor } from './job-plates.js';
+import { assignScenes, plateAsk, plateHtml, placePopHtml, levelOf, inkFor, askActs } from './job-plates.js';
+import { planGraphHtml } from './job-graph.js';
 
 const sub = (id, extra = {}) => ({ id, title: `Deliver ${id}`, repo: '/Users/me/repo', after: [], sessions: [], repairs: [], ...extra });
 const job = (extra = {}) => ({ id: 'job1', title: 'Sign-in', intent: 'x', repos: ['/Users/me/repo'], stage: 'active', subJobs: [], runs: [], moves: [], reviewMerge: true, createdAt: 1, ...extra });
@@ -30,13 +31,29 @@ test('the stub names the one thing a job needs from you, and nothing when it nee
   assert.deepEqual(['label', 'button', 'act', 'sub', 'tone'].map((k) => plateAsk(job({ subJobs: [green] }))[k]), ['Merge #7', 'Merge', 'merge', 'api', 'warn']);
   const review = sub('api', { stage: 'review', state: 'verified' });
   assert.deepEqual(['label', 'button', 'act'].map((k) => plateAsk(job({ subJobs: [review] }))[k]), ['Review code', 'Review', 'open']);
-  const blocked = sub('api', { stage: 'pr', error: 'Automatic repair limit reached', blocked: { move: 'split-out' }, pr: { url: 'https://github.com/o/r/pull/9', head: 'h9', checkStatus: 'failing', checks: [] } });
+  const kept = sub('api', { stage: 'cleanup', cancelledAt: 1, error: 'Worktree has work that would be lost', cleanupRefusal: { path: '/wt', files: [], fileCount: 0 } });
+  assert.deepEqual(['label', 'button', 'tone', 'sub'].map((k) => plateAsk(job({ cancelledAt: 1, subJobs: [kept] }))[k]), ['Cancelled · worktree kept', 'Open', 'warn', 'api']);
+  assert.equal(plateAsk(job({ cancelledAt: 1, subJobs: [{ ...kept, error: null, cleanupRefusal: null }] })), null, 'plain cleanup asks for nothing');
+  const blocked = sub('api', { stage: 'pr', error: 'Automatic repair limit reached', pr: { url: 'https://github.com/o/r/pull/9', head: 'h9', checkStatus: 'failing', checks: [] } });
   const failing = plateAsk(job({ subJobs: [blocked] }));
-  assert.deepEqual([failing.tone, failing.act, failing.detail], ['bad', 'move:split-out', '#9 · Deliver api'], 'the agent’s suggested move is the button');
+  assert.deepEqual([failing.tone, failing.button, failing.act, failing.detail], ['bad', 'Resolve', 'open', '#9 · Deliver api'], 'a red step opens to be resolved: the box is there');
   const prompt = sub('s', { kind: 'session', stage: 'session', sessions: ['card-1'] });
   assert.deepEqual(['button', 'act'].map((k) => plateAsk(job({ subJobs: [prompt], runs: [{ id: 'r', subJobId: 's', stopped: false, status: 'needs-you' }] }))[k]), ['Answer', 'session']);
   assert.equal(plateAsk(job({ subJobs: [sub('api', { stage: 'implementation' })], runs: [{ id: 'r', subJobId: 'api', stopped: false, status: 'working' }] })), null);
   assert.equal(plateAsk(job({ paused: true, subJobs: [green] })), null, 'a paused job asks nothing');
+});
+
+test('a prompt waiting anywhere is the stub, answered on the waiting run’s own card', () => {
+  const planning = plateAsk(job({ stage: 'planning', plan: null, runs: [{ id: 'p', subJobId: null, stopped: false, status: 'needs-you', sessionId: 'plan-card' }] }));
+  assert.deepEqual(['label', 'detail', 'button', 'act', 'sub', 'session'].map((k) => planning[k]), ['Prompt waiting', 'Planning', 'Answer', 'session', '', 'plan-card'], 'the planning run has no sub-job, but it has a card');
+  const green = sub('api', { stage: 'pr', pr: { url: 'https://github.com/o/r/pull/7', head: 'h7', checkStatus: 'passing', checks: [] } });
+  const note = sub('note', { kind: 'session', stage: 'session', sessions: ['old-card'] });
+  const docs = sub('docs', { kind: 'session', stage: 'session' });
+  const behind = plateAsk(job({ subJobs: [green, note], runs: [{ id: 'n', subJobId: 'note', stopped: false, status: 'needs-you', sessionId: 'note-card' }] }));
+  assert.deepEqual(['label', 'detail', 'act', 'sub', 'session'].map((k) => behind[k]), ['Prompt waiting', 'Deliver note', 'session', 'note', 'note-card'], 'a prompt outranks a green PR earlier in the plan');
+  const two = plateAsk(job({ subJobs: [green, note, docs], runs: [{ id: 'd', subJobId: 'docs', stopped: false, status: 'needs-you', sessionId: 'docs-card', startedAt: 1 }, { id: 'n', subJobId: 'note', stopped: false, status: 'needs-you', sessionId: 'note-card', startedAt: 2 }] }));
+  assert.deepEqual([two.detail, two.session], ['Deliver docs +1', 'docs-card'], 'the longest-waiting first, the rest counted');
+  assert.match(plateHtml(job({ subJobs: [note], runs: [{ id: 'n', subJobId: 'note', stopped: false, status: 'needs-you', sessionId: 'note-card' }] }), 'sonnet'), /data-ask="session" data-job="job1" data-sub="note" data-session="note-card"/);
 });
 
 test('a plate draws its plan as kind shapes in the sky, dashed where work waits for a deploy, and escapes what agents wrote', () => {
@@ -53,13 +70,24 @@ test('a plate draws its plan as kind shapes in the sky, dashed where work waits 
   assert.match(html, /1 of 4 landed/);
 });
 
-test('plate art: the skyline alone, the scene behind it on hover, or the scene alone with ink that follows it', () => {
+test('plate art: the sky alone, or the scene alone with ink that follows it', () => {
   const j = job({ subJobs: [sub('api', { stage: 'implementation' })] });
   const quiet = plateHtml(j, 'haiku', 'quiet'), full = plateHtml(j, 'haiku', 'full');
-  assert.ok(quiet.includes('class="skyline"') && !quiet.includes('class="scene"'));
-  assert.ok(!full.includes('class="skyline"') && full.includes('class="scene"') && full.includes('class="scrim"'));
+  assert.ok(quiet.includes('class="gx"') && !quiet.includes('class="scene"'));
+  assert.ok(!full.includes('class="gx"') && full.includes('class="scene"') && full.includes('class="scrim"'));
   assert.match(quiet, /job-plate-tag lt/, 'light ink on the night sky whatever the scene');
   assert.match(full, /job-plate-tag dk/, 'dark ink on the ivory page');
+});
+
+test('the quiet sky is a placeholder with the graph\u2019s floor, tone and level, drawn with no DOM', () => {
+  assert.equal(typeof document, 'undefined');
+  const tall = job({ subJobs: [sub('a', { stage: 'done' }), sub('b', { after: ['a'], stage: 'implementation' }), sub('c', { after: ['a'], stage: 'implementation' }), sub('d', { after: ['a'], stage: 'implementation' }), sub('e', { after: ['b', 'c', 'd'] })] });
+  const lone = job({ subJobs: [sub('a', { stage: 'implementation' })] });
+  const attr = (html, k) => html.match(new RegExp(`class="gx"[^>]*data-${k}="([^"]*)"`))[1];
+  assert.ok(+attr(plateHtml(tall, 'opus'), 'floor') > +attr(plateHtml(lone, 'opus'), 'floor'), 'a taller plan reports a lower floor');
+  assert.match(plateHtml(lone, 'opus'), /class="gx"[^>]*data-tone="idle"|class="gx"[^>]*data-tone="(run|warn|bad|ok|pause)"/);
+  assert.match(plateHtml(job({ stage: 'backlog', subJobs: [] }), 'opus'), /class="gx"[^>]*data-floor="82"/);
+  assert.equal(plateHtml(lone, 'opus', 'full').includes('class="gx"'), false);
 });
 
 test('a write is a moon off the session that makes it, its place a chip under the title, and a draft in review the stub', () => {
@@ -81,10 +109,36 @@ test('a write is a moon off the session that makes it, its place a chip under th
   assert.ok(!html.includes('#web<b>'));
   const ask = plateAsk(j);
   assert.deepEqual([ask.label, ask.detail, ask.button, ask.act, ask.sub, ask.alt], ['Draft ready', '', 'Post to Slack', 'approve-write', 'w', { label: 'Skip', act: 'skip-write' }]);
-  assert.match(html, /<button type="button" class="job-plate-alt" data-ask="skip-write" data-job="job1" data-sub="w">Skip<\/button><button type="button" class="job-plate-go" data-ask="approve-write" data-job="job1" data-sub="w">Post to Slack<\/button>/);
+  assert.match(html, /<button type="button" class="job-plate-alt" data-ask="skip-write" data-job="job1" data-sub="w">Skip<\/button><button type="button" class="job-plate-go acts" data-ask="approve-write" data-job="job1" data-sub="w"><svg class="icon"[^>]*><path d="M5 12.5l4.5 4.5L19 7.5"\/><\/svg><span>Post to Slack<\/span><\/button>/);
   const made = { ...draft, place: { type: 'artifact' }, action: { type: 'make', what: 'chart' }, result: { url: 'https://claude.ai/artifact/1', at: 1 } };
   const output = plateAsk(job({ ...j, subJobs: [j.subJobs[0], j.subJobs[1], made] }));
   assert.deepEqual([output.label, output.button, output.alt], ['Check output', 'Accept', null], 'a made output is accepted, never skipped');
   const failing = plateAsk(job({ ...j, subJobs: [sub('api', { stage: 'implementation', error: 'boom' }), j.subJobs[1], draft] }));
   assert.equal(failing.tone, 'bad', 'failing still wins over a draft');
+});
+
+test('a stub button that acts now is filled, and one that only opens is outlined with an arrow', () => {
+  assert.deepEqual(['merge', 'approve-write', 'skip-write', 'open', 'session'].map(askActs), [true, true, true, false, false]);
+  const green = sub('api', { stage: 'pr', pr: { url: 'https://github.com/o/r/pull/7', head: 'h7', checkStatus: 'passing', checks: [] } });
+  const merge = plateHtml(job({ subJobs: [green] }), 'opus').match(/<button type="button" class="job-plate-go[^"]*"[\s\S]*?<\/button>/)[0];
+  assert.match(merge, /^<button type="button" class="job-plate-go acts" data-ask="merge"[^>]*><svg class="icon"[^>]*><circle cx="6" cy="5"[\s\S]*<\/svg><span>Merge<\/span><\/button>$/, 'leads with the merge glyph');
+  const review = plateHtml(job({ subJobs: [sub('api', { stage: 'review', state: 'verified' })] }), 'opus').match(/<button type="button" class="job-plate-go[^"]*"[\s\S]*?<\/button>/)[0];
+  assert.match(review, /^<button type="button" class="job-plate-go opens" data-ask="open"[^>]*><span>Review<\/span><svg class="icon"[^>]*><path d="M5 12h14M13 6l6 6-6 6"\/><\/svg><\/button>$/, 'trails an arrow');
+});
+
+test('a plate stacks each column in the order and rows the expanded dialog untangles it into', () => {
+  // b → c and a → d cross in plan order, and a → e skips a wave past them.
+  const j = job({ subJobs: [sub('a'), sub('b'), sub('c', { after: ['b'] }), sub('d', { after: ['a'] }), sub('e', { after: ['c', 'a'] })] });
+  const svg = plateHtml(j, 'opus').match(/<svg class="job-plate-graph"[\s\S]*?<\/svg>/)[0];
+  const plate = new Map();
+  for (const m of svg.matchAll(/data-sub="([^"]+)"[\s\S]*?<circle cx="([\d.]+)" cy="([\d.]+)" r="13"/g)) plate.set(m[2], [...(plate.get(m[2]) || []), [+m[3], m[1]]]);
+  const plateCols = [...plate.entries()].sort((p, q) => p[0] - q[0]).map(([, col]) => col.sort((p, q) => p[0] - q[0]).map(([, id]) => id));
+  const dialog = [];
+  for (const m of planGraphHtml(j.plan || { subJobs: j.subJobs }, {}).matchAll(/data-col="(\d+)" style="[^"]*grid-row:(\d+)"><div[^>]*data-node="([^"]+)"/g)) (dialog[+m[1]] ||= []).push([+m[2], m[3]]);
+  const dialogCols = dialog.map((col) => col.sort((p, q) => p[0] - q[0]).map(([, id]) => id));
+  assert.deepEqual(dialogCols[1], ['d', 'c'], 'the dialog swaps the column out of plan order to untangle it');
+  assert.deepEqual(plateCols, dialogCols);
+  const ys = new Map([...plate.values()].flat().map(([y, id]) => [id, y]));
+  assert.equal(ys.get('e'), ys.get('a'), 'e takes the median row of its prerequisites, as in the dialog');
+  assert.match(svg, /<path class="edge [^"]*" d="M64,56 C[^"]*,70 160,70 C[^"]*"\/>/, 'the wave-skipping link follows its lane through the column it skips');
 });

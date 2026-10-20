@@ -3,21 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Automated jobs for Agent Wrangler, as an installable extension",
+  "description": "A new way of working with AI: breaks work into AI sessions and PRs, proves the changes work, and gets more done in parallel. An Agent Wrangler extension.",
   "license": "Apache-2.0",
   "scripts": {
-    "test": "node --test --import ./test-setup.js 'server/*.test.js' 'public/*.test.js'"
+    "test": "node --test --import ./test-setup.js server/*.test.js public/*.test.js"
   },
   "wranglerExtension": {
     "id": "jobs",
-    "label": "Automated jobs (Wrangler²)",
+    "label": "Wrangler²",
     "description": "Plan a goal into PRs (under Jira stories where the work has tickets), run each step as its own bounded agent session in a dedicated worktree, and gate the risky moments (plan, code, merge) on a human.",
     "author": "Charlie Goldstraw",
     "homepage": "https://github.com/charlie-ps/wrangler-squared",
     "requires": [
       "sessions:read", "sessions:spawn", "sessions:archive", "sessions:bill", "sessions:wake",
       "mail:send", "tasks:read", "tasks:write",
-      "usage:read", "board:rebuild", "board:broadcast", "images:keep"
+      "usage:read", "board:rebuild", "board:broadcast", "images:keep", "files:view"
     ]
   },
   "dependencies": {
